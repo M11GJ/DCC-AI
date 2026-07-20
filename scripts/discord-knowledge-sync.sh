@@ -22,7 +22,7 @@ fi
 
 DISCORD_BOT_TOKEN=$(grep -E '^DISCORD_BOT_TOKEN=' /opt/dccai/.env | cut -d= -f2- | tr -d '"'"'" | head -1)
 DISCORD_GUILD_ID=$(grep -E '^DISCORD_GUILD_ID=' /opt/dccai/.env | cut -d= -f2- | tr -d '"'"'" | head -1)
-DISCORD_EXCLUDED_CHANNELS=$(grep -E '^DISCORD_EXCLUDED_CHANNELS=' /opt/dccai/.env | cut -d= -f2- | tr -d '"'"'" | head -1)
+DISCORD_INCLUDED_CHANNELS=$(grep -E '^DISCORD_INCLUDED_CHANNELS=' /opt/dccai/.env | cut -d= -f2- | tr -d '"'"'" | head -1 || echo "")
 DISCORD_INITIAL_FETCH_DAYS=$(grep -E '^DISCORD_INITIAL_FETCH_DAYS=' /opt/dccai/.env | cut -d= -f2- | tr -d '"'"'" | head -1)
 
 if [ -z "${DISCORD_BOT_TOKEN}" ]; then
@@ -37,9 +37,10 @@ docker cp "${SYNC_PY}" open-webui:/tmp/discord-knowledge-sync.py
 
 log "同期開始..."
 docker exec \
+    -e PYTHONPATH=/app/backend \
     -e DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN}" \
     -e DISCORD_GUILD_ID="${DISCORD_GUILD_ID:-1304292402386964502}" \
-    -e DISCORD_EXCLUDED_CHANNELS="${DISCORD_EXCLUDED_CHANNELS:-A}" \
+    -e DISCORD_INCLUDED_CHANNELS="${DISCORD_INCLUDED_CHANNELS:-}" \
     -e DISCORD_INITIAL_FETCH_DAYS="${DISCORD_INITIAL_FETCH_DAYS:-90}" \
     open-webui \
     python3 /tmp/discord-knowledge-sync.py
