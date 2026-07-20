@@ -17,6 +17,21 @@ import os
 PORT = int(os.environ.get("PORT", "3001"))
 LITELLM_METRICS_URL = os.environ.get("LITELLM_METRICS_URL", "http://127.0.0.1:4000/metrics/")
 
+def load_all_models():
+    models = []
+    try:
+        with open("/app/config.yaml", "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return models
+
+    ids = re.findall(r'id:\s*["\']?([^"\',\}]+)["\']?', content)
+    for model_id in ids:
+        name = model_id.strip()
+        if name and name not in models:
+            models.append(name)
+    return models
+
 def fetch_and_parse_metrics():
     try:
         req = urllib.request.Request(LITELLM_METRICS_URL)
@@ -36,6 +51,18 @@ def fetch_and_parse_metrics():
             "success_rate": 100.0
         }
     }
+
+    # config.yaml から設定済みの全モデルIDをプリロードし、リクエスト数0でもUIに表示されるようにする
+    for m_id in load_all_models():
+        stats["deployments"][m_id] = {
+            "model_id": m_id,
+            "api_key_name": "Active" if "Gemini Key" in m_id else "Configured",
+            "success": 0,
+            "failed": 0,
+            "latency_sum": 0.0,
+            "latency_count": 0,
+            "avg_latency": 0.0
+        }
 
     # Regex for Prometheus: metric_name{labels} value
     metric_re = re.compile(r'^(\w+)\{(.*?)\}\s+(.+)$', re.MULTILINE)
@@ -73,15 +100,15 @@ def fetch_and_parse_metrics():
 
         dep = stats["deployments"][dep_key]
 
-        if metric_name == "litellm_deployment_successful_requests_total":
+        if metric_name == "litellm_requests_metric_total":
             dep["success"] = int(val)
             stats["totals"]["success"] += int(val)
-        elif metric_name == "litellm_deployment_failed_requests_total":
+        elif metric_name == "litellm_deployment_failure_responses_total":
             dep["failed"] = int(val)
             stats["totals"]["failed"] += int(val)
-        elif metric_name == "litellm_deployment_latency_seconds_sum":
+        elif metric_name == "litellm_request_total_latency_metric_sum":
             dep["latency_sum"] = val
-        elif metric_name == "litellm_deployment_latency_seconds_count":
+        elif metric_name == "litellm_request_total_latency_metric_count":
             dep["latency_count"] = int(val)
 
     # 成功率計算
