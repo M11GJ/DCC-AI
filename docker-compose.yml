@@ -26,10 +26,10 @@ services:
       - GEMINI_API_KEY_3=${GEMINI_API_KEY_3}
       - GEMINI_API_KEY_4=${GEMINI_API_KEY_4}
       - GEMINI_API_KEY_5=${GEMINI_API_KEY_5}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-    # ポートは外部公開せず、open-webui からのみ内部ネットワークで到達
-    expose:
-      - "4000"
+    ports:
+      - "127.0.0.1:4000:4000"
     restart: unless-stopped
 
   cloudflared:
@@ -52,16 +52,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    restart: unless-stopped
-    volumes:
-      - ./searxng:/etc/searxng
-    environment:
-      - SEARXNG_BASE_URL=http://searxng:8080/
-    # 外部公開なし（open-webui からの内部アクセスのみ）
 
 volumes:
   open-webui: {}
