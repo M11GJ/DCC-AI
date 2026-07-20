@@ -9,6 +9,9 @@ requirements: httpx
 import asyncio
 import json
 import os
+import re
+import base64
+import glob
 from datetime import date
 from typing import Optional, Callable, Awaitable, Any
 
@@ -70,7 +73,7 @@ class Pipe:
             description="画像処理用ローカルOllamaのURL",
         )
         VISION_MODEL: str = Field(
-            default="qwen2.5-vl:7b",
+            default="qwen2.5vl:7b",
             description="画像説明用モデル名",
         )
         VISION_PROMPT: str = Field(
@@ -84,8 +87,26 @@ class Pipe:
     # Open WebUI に 2 つのモデルとして出す
     def pipes(self):
         return [
-            {"id": "dccai-high", "name": "DCC AI High"},
-            {"id": "dccai-low", "name": "DCC AI Low"},
+            {
+                "id": "dccai-high-vision",
+                "name": "DCC AI High",
+                "meta": {
+                    "vision": True,
+                    "capabilities": {
+                        "citations": False
+                    }
+                }
+            },
+            {
+                "id": "dccai-low-vision",
+                "name": "DCC AI Low",
+                "meta": {
+                    "vision": True,
+                    "capabilities": {
+                        "citations": False
+                    }
+                }
+            },
         ]
 
     # ---- High 日次利用回数の簡易カウンタ（ファイル保存） ----
@@ -139,10 +160,16 @@ class Pipe:
 
         user_id = (__user__ or {}).get("id") or (__user__ or {}).get("email") or "unknown"
 
-        # 選択モデル（"dccai.dccai-high" のように prefix が付くので末尾で判定）
+        # 選択モデル（"dccai.dccai-high-vision" のように prefix が付くので末尾で判定）
         raw_model = str(body.get("model", ""))
-        is_high = "high" in raw_model.rsplit(".", 1)[-1].lower()
-        upstream = self.valves.HIGH_UPSTREAM if is_high else self.valves.LOW_UPSTREAM
+        model_suffix = raw_model.rsplit(".", 1)[-1].lower()
+        
+        is_high = False
+        if "high" in model_suffix:
+            upstream = self.valves.HIGH_UPSTREAM
+            is_high = True
+        else:
+            upstream = self.valves.LOW_UPSTREAM
 
         # ---- High の 1 日上限チェック ----
         if is_high and self.valves.HIGH_DAILY_LIMIT > 0:
@@ -162,10 +189,12 @@ class Pipe:
         # ---- 画像インターセプト (ローカルOllamaでテキスト化) ----
         processed_messages = []
         for msg in messages:
-            content = msg.get("content")
+            content = msg.get("content", "")
+            
+            text_parts = []
+            images_to_process = []
+            
             if isinstance(content, list):
-                text_parts = []
-                images_to_process = []
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "image_url":
                         url = item.get("image_url", {}).get("url", "")
@@ -176,28 +205,83 @@ class Pipe:
                         text_parts.append(item.get("text", ""))
                     elif isinstance(item, str):
                         text_parts.append(item)
+            elif isinstance(content, str):
+                text_parts.append(content)
                 
-                if images_to_process:
-                    await status("👁️ 画像を解析しています (Local GPU)...", False)
+            combined_text = "\n".join(text_parts)
+            
+            # Open WebUIの <attached_files> XML形式からのファイル読み込み (ローカルボリュームから直接取得)
+            if "<attached_files>" in combined_text:
+                file_urls = re.findall(r'<file\s+[^>]*url="([^"]+)"', combined_text)
+                for f_url in file_urls:
+                    matches = glob.glob(f"/app/backend/data/uploads/*{f_url}*")
+                    if matches:
+                        try:
+                            with open(matches[0], "rb") as f:
+                                b64 = base64.b64encode(f.read()).decode("utf-8")
+                                images_to_process.append(b64)
+                        except Exception:
+                            pass
+                # LLMが混乱しないようXMLブロックを削除
+                combined_text = re.sub(r'<attached_files>.*?</attached_files>', '', combined_text, flags=re.DOTALL)
+            
+            if images_to_process:
+                if is_high:
+                    await status("👁️ 画像を処理しています...", False)
+                    vision_text = ""
                     try:
                         async with httpx.AsyncClient(timeout=120) as client:
-                            ollama_payload = {
-                                "model": self.valves.VISION_MODEL,
-                                "prompt": self.valves.VISION_PROMPT,
-                                "images": images_to_process,
+                            # 1. まず Gemini (Low_UPSTREAM) に投げて画像解析を試みる
+                            gemini_content = [{"type": "text", "text": self.valves.VISION_PROMPT}]
+                            for b64 in images_to_process:
+                                gemini_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                            
+                            gemini_payload = {
+                                "model": self.valves.LOW_UPSTREAM,
+                                "messages": [{"role": "user", "content": gemini_content}],
                                 "stream": False
                             }
-                            resp = await client.post(f"{self.valves.OLLAMA_BASE_URL}/api/generate", json=ollama_payload)
+                            resp = await client.post(
+                                f"{self.valves.LITELLM_BASE_URL}/chat/completions",
+                                json=gemini_payload,
+                                headers=self._headers()
+                            )
                             if resp.status_code == 200:
-                                vision_text = resp.json().get("response", "")
-                                text_parts.append(f"\n[添付画像の説明: {vision_text}]\n")
+                                vision_text = resp.json()["choices"][0]["message"]["content"]
                             else:
-                                text_parts.append(f"\n[画像解析エラー: {resp.status_code}]\n")
+                                raise Exception(f"Gemini API returned {resp.status_code}")
                     except Exception as e:
-                        text_parts.append(f"\n[画像解析エラー: {e}]\n")
-                
-                msg = {**msg, "content": "\n".join(text_parts)}
-            processed_messages.append(msg)
+                        # 2. 失敗したらローカルOllamaへ予備（フォールバック）として投げる
+                        await status("⚠️ 予備の画像処理システムへ切り替えています...", False)
+                        try:
+                            async with httpx.AsyncClient(timeout=120) as client:
+                                ollama_payload = {
+                                    "model": self.valves.VISION_MODEL,
+                                    "prompt": self.valves.VISION_PROMPT,
+                                    "images": images_to_process,
+                                    "stream": False
+                                }
+                                resp = await client.post(f"{self.valves.OLLAMA_BASE_URL}/api/generate", json=ollama_payload)
+                                if resp.status_code == 200:
+                                    vision_text = resp.json().get("response", "")
+                                else:
+                                    return f"🔧 【ローカルOllama エラー】\n画像のテキスト化中にエラーが返されました。\nステータス: {resp.status_code}\n内容: {resp.text}"
+                        except Exception as e2:
+                            return f"🔧 【画像処理エラー】\nGeminiおよびローカルOllamaの両方で画像解析に失敗しました。\n詳細: {e2}"
+                    
+                    combined_text += f"\n\n[添付画像の説明: {vision_text}]\n"
+                    processed_messages.append({**msg, "content": combined_text})
+                else:
+                    # Low (Gemini) はマルチモーダルネイティブ対応なのでOllamaを使わずそのまま送る
+                    content_list = [{"type": "text", "text": combined_text}]
+                    for b64 in images_to_process:
+                        content_list.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                        })
+                    processed_messages.append({**msg, "content": content_list})
+            else:
+                processed_messages.append({**msg, "content": combined_text})
         
         messages = processed_messages
 
