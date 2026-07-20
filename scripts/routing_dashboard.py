@@ -12,8 +12,10 @@ import urllib.request
 import urllib.error
 import sys
 
-PORT = 3001
-LITELLM_METRICS_URL = "http://127.0.0.1:4000/metrics/"
+import os
+
+PORT = int(os.environ.get("PORT", "3001"))
+LITELLM_METRICS_URL = os.environ.get("LITELLM_METRICS_URL", "http://127.0.0.1:4000/metrics/")
 
 def fetch_and_parse_metrics():
     try:
@@ -36,12 +38,15 @@ def fetch_and_parse_metrics():
     }
 
     # Regex for Prometheus: metric_name{labels} value
-    metric_re = re.compile(r'^(\w+)\{(.*?)\}\s+([\d\.e\+]+)', re.MULTILINE)
+    metric_re = re.compile(r'^(\w+)\{(.*?)\}\s+(.+)$', re.MULTILINE)
     label_re = re.compile(r'(\w+)="([^"]*)"')
 
     for match in metric_re.finditer(content):
         metric_name, label_str, val_str = match.groups()
-        val = float(val_str)
+        try:
+            val = float(val_str.strip())
+        except ValueError:
+            val = 0.0
 
         labels = {}
         for l_match in label_re.finditer(label_str):
