@@ -1,40 +1,42 @@
 model_list:
   # ---- Low：既定・全員・高速。日常の質問はこれ ----
   # ※LiteLLMの機能で、同じmodel_nameを複数書くと自動的にラウンドロビン（並列負荷分散）されます。
+  # >>> GEMINI_LOW_START (gemini-key-health が自動管理。手動編集しないこと) <<<
   - model_name: dccai-low
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_1
       rpm: 60
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Gemini Key 1", input_cost_per_token: 0, output_cost_per_token: 0 }
 
   - model_name: dccai-low
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_2
       rpm: 60
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Gemini Key 2", input_cost_per_token: 0, output_cost_per_token: 0 }
 
   - model_name: dccai-low
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_3
       rpm: 60
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Gemini Key 3", input_cost_per_token: 0, output_cost_per_token: 0 }
 
   - model_name: dccai-low
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_4
       rpm: 60
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Gemini Key 4", input_cost_per_token: 0, output_cost_per_token: 0 }
 
   - model_name: dccai-low
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_5
       rpm: 60
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Gemini Key 5", input_cost_per_token: 0, output_cost_per_token: 0 }
+  # >>> GEMINI_LOW_END <<<
 
   # ---- High：重い課題向け。強力な大型モデル ----
   # Cerebras と DeepSeek V3 (Featherless) を並列で負荷分散（ラウンドロビン）
@@ -43,7 +45,7 @@ model_list:
       model: cerebras/llama-3.3-70b
       api_key: os.environ/CEREBRAS_API_KEY
       rpm: 30
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Cerebras Llama-3.3-70b", input_cost_per_token: 0, output_cost_per_token: 0 }
 
   - model_name: dccai-high
     litellm_params:
@@ -51,7 +53,7 @@ model_list:
       api_base: https://api.featherless.ai/v1
       api_key: os.environ/FEATHERLESS_API_KEY
       rpm: 30
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "DeepSeek-V3 (Featherless)", input_cost_per_token: 0, output_cost_per_token: 0 }
 
   # ---- Backup Low：Geminiが使えない時のフェイルオーバー ----
   - model_name: dccai-backup-low
@@ -60,7 +62,7 @@ model_list:
       api_base: https://api.featherless.ai/v1
       api_key: os.environ/FEATHERLESS_API_KEY
       rpm: 60
-    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "Qwen-2.5-7B (Featherless Backup)", input_cost_per_token: 0, output_cost_per_token: 0 }
 
 litellm_settings:
   num_retries: 2

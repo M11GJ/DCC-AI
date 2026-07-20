@@ -36,12 +36,14 @@ def alive(key):
         return None  # ネットワーク不調などは判定不能=現状維持
 
 def block(name):
+    match = re.match(r'GEMINI_API_KEY_(\d+)', name)
+    label = f"Gemini Key {match.group(1)}" if match else name
     return ("  - model_name: dccai-low\n"
             "    litellm_params:\n"
             f"      model: gemini/{MODEL}\n"
             f"      api_key: os.environ/{name}\n"
             "      rpm: 60\n"
-            "    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }")
+            f"    model_info: {{ id: \"{label}\", input_cost_per_token: 0, output_cost_per_token: 0 }}")
 
 def main():
     keys=load_keys()
