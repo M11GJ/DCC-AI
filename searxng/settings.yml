@@ -1,0 +1,75 @@
+# SearXNG 設定ファイル for DCC AI
+# 参考: https://docs.searxng.org/admin/settings/settings.html
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "DCC AI Search"
+
+search:
+  safe_search: 0
+  autocomplete: ''
+  default_lang: 'ja'
+  formats:
+    - html
+    - json      # ← Open WebUI から利用するために必須
+
+server:
+  secret_key: "e6f4eab0f32b78c791806e994cd51c3a44ae4356b63472d77fb9935eb0d9564c"
+  limiter: false          # 内部利用のみなのでレート制限は不要
+  image_proxy: false
+  port: 8080
+  bind_address: "0.0.0.0"
+
+# secret_key は初回起動時に自動生成
+# （/opt/dccai/searxng/secret_key に保存される）
+
+ui:
+  static_use_hash: true
+  default_locale: ja
+
+enabled_plugins:
+  - 'Hash plugin'
+  - 'Self Information'
+  - 'Tracker URL remover'
+
+# 利用する検索エンジンの設定
+# Google は IP ブロック・CAPTCHA を避けるため無効化
+# DuckDuckGo, Brave, Mojeek を優先
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: dd
+    use_mobile_ui: false
+    weight: 1
+
+  - name: brave
+    engine: brave
+    shortcut: bv
+    time_range_support: true
+    paging: false
+    language_support: false
+    weight: 1
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mjk
+    weight: 1
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    base_url: 'https://ja.wikipedia.org/'
+    weight: 1
+
+  # Google は無効化（IP ブロック・CAPTCHA リスクが高い）
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: true
+
+  - name: google news
+    engine: google_news
+    shortcut: gn
+    disabled: true
