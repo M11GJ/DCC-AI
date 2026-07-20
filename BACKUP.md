@@ -6,7 +6,7 @@
 |---|---|
 | 実行タイミング | 毎日 03:00（systemd timer: `dccai-backup.timer`） |
 | 保存先（主） | `/opt/dccai/backups/<日時>/` |
-| 保存先（副） | `/mnt/c/Users/gunnk/dccai_backups/<日時>/` |
+| 保存先（副） | `/mnt/c/Users/DCC05/dccai_backups/<日時>/` |
 | 世代管理 | 直近7世代を保持（古いものは自動削除） |
 | バックアップ内容 | `webui.db`（SQLite整合バックアップ）＋設定ファイル一式 |
 

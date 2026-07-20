@@ -68,3 +68,15 @@ python3 /opt/dccai/scripts/gemini-key-health.py
 - 自動バックアップ: systemd timer `dccai-backup.timer`（1日1回）
 - 保存先: `/opt/dccai/backups/`（直近7世代）
 - 復旧手順: `/opt/dccai/BACKUP.md` を参照
+
+---
+
+## ホスト情報(2026-07-20 移行)
+
+現在の本番ホスト: `desktop-1f999hf`(`ssh dcc05@desktop-1f999hf`、WSL2 Ubuntu 26.04、GPU: RTX 4060）
+
+旧ホスト `omen17`(`ssh gunnk@100.90.136.25`、WSL2 Ubuntu-24.04）は**ロールバック用に停止状態のまま温存**中。`/opt/dccai` はそのまま残っており、`docker compose up -d` で即復旧可能。運用が安定したら削除を検討。
+
+cloudflaredはトークン方式のリモート管理トンネルのため、ホストを跨いでもDNS変更は不要（起動しているホストへ自動的にルーティングされる）。**両ホストで同時に起動しないこと**(セッション不整合の原因になる)。
+
+移行時、新ホストの`cloudflared`コンテナ名は既存の別コンテナと衝突したため `dccai-cloudflared` にリネームしている。

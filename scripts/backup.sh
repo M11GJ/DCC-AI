@@ -7,7 +7,7 @@ set -euo pipefail
 
 DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="/opt/dccai/backups/${DATE}"
-WIN_DIR="/mnt/c/Users/gunnk/dccai_backups/${DATE}"
+WIN_DIR="/mnt/c/Users/DCC05/dccai_backups/${DATE}"
 LOG_FILE="/opt/dccai/scripts/backup.log"
 KEEP_GENERATIONS=7
 
@@ -77,7 +77,7 @@ log "設定ファイルのバックアップ完了"
 # 4. Windows 側にコピー（失敗しても警告を出して続行）
 # -------------------------------------------------------------------
 WIN_COPY_OK=false
-if [ -d "/mnt/c/Users/gunnk" ]; then
+if [ -d "/mnt/c/Users/DCC05" ]; then
   log "Windows側へのコピー開始: ${WIN_DIR}"
   if mkdir -p "${WIN_DIR}" && cp -r "${BACKUP_DIR}/." "${WIN_DIR}/"; then
     log "Windows側コピー完了"
@@ -86,7 +86,7 @@ if [ -d "/mnt/c/Users/gunnk" ]; then
     log "WARNING: Windows側へのコピーに失敗（サーバ内バックアップは正常）"
   fi
 else
-  log "WARNING: /mnt/c/Users/gunnk が見つかりません（Windows側コピースキップ）"
+  log "WARNING: /mnt/c/Users/DCC05 が見つかりません（Windows側コピースキップ）"
 fi
 
 # -------------------------------------------------------------------
@@ -102,7 +102,7 @@ else
 fi
 
 if [ "${WIN_COPY_OK}" = "true" ]; then
-  OLD_WIN=$(ls -dt /mnt/c/Users/gunnk/dccai_backups/*/ 2>/dev/null | tail -n +"$((KEEP_GENERATIONS + 1))" || true)
+  OLD_WIN=$(ls -dt /mnt/c/Users/DCC05/dccai_backups/*/ 2>/dev/null | tail -n +"$((KEEP_GENERATIONS + 1))" || true)
   if [ -n "${OLD_WIN}" ]; then
     echo "${OLD_WIN}" | xargs rm -rf
     log "  Windows側の古いバックアップを削除しました"

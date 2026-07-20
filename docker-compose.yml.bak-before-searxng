@@ -26,31 +26,17 @@ services:
       - GEMINI_API_KEY_3=${GEMINI_API_KEY_3}
       - GEMINI_API_KEY_4=${GEMINI_API_KEY_4}
       - GEMINI_API_KEY_5=${GEMINI_API_KEY_5}
-      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
-    ports:
-      - "127.0.0.1:4000:4000"
+    # ポートは外部公開せず、open-webui からのみ内部ネットワークで到達
+    expose:
+      - "4000"
     restart: unless-stopped
 
   cloudflared:
     image: cloudflare/cloudflared:latest
-    container_name: dccai-cloudflared
+    container_name: cloudflared
     command: tunnel --no-autoupdate run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMTg2OGJjZjktMjJiNC00ZmU3LTliZjYtMzE1MjY2ZjJjYzczIiwicyI6IlpESm1PREJqTkdRdE5qWmtPUzAwWmpKa0xXRXlNRFF0WWpCalpEWXpZMk5rWlRGaSJ9
     network_mode: host
-    restart: unless-stopped
-
-  dashboard:
-    image: python:3.11-slim
-    container_name: dccai-dashboard
-    volumes:
-      - ./scripts/routing_dashboard.py:/app/routing_dashboard.py:ro
-      - ./litellm/config.yaml:/app/config.yaml:ro
-    command: python3 /app/routing_dashboard.py
-    environment:
-      - PORT=3001
-      - LITELLM_METRICS_URL=http://litellm:4000/metrics/
-    ports:
-      - "3001:3001"
     restart: unless-stopped
 
   ollama:
@@ -67,15 +53,6 @@ services:
               count: 1
               capabilities: [gpu]
 
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    volumes:
-      - ./searxng:/etc/searxng
-      - searxng-cache:/var/cache/searxng
-    restart: unless-stopped
-
 volumes:
   open-webui: {}
   ollama: {}
-  searxng-cache: {}

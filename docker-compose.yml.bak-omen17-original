@@ -34,7 +34,7 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:latest
-    container_name: dccai-cloudflared
+    container_name: cloudflared
     command: tunnel --no-autoupdate run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMTg2OGJjZjktMjJiNC00ZmU3LTliZjYtMzE1MjY2ZjJjYzczIiwicyI6IlpESm1PREJqTkdRdE5qWmtPUzAwWmpKa0xXRXlNRFF0WWpCalpEWXpZMk5rWlRGaSJ9
     network_mode: host
     restart: unless-stopped
@@ -67,15 +67,6 @@ services:
               count: 1
               capabilities: [gpu]
 
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    volumes:
-      - ./searxng:/etc/searxng
-      - searxng-cache:/var/cache/searxng
-    restart: unless-stopped
-
 volumes:
   open-webui: {}
   ollama: {}
-  searxng-cache: {}
