@@ -1,0 +1,88 @@
+model_list:
+  # ---- Low：既定・全員・高速。日常の質問はこれ ----
+  # ※LiteLLMの機能で、同じmodel_nameを複数書くと自動的にラウンドロビン（並列負荷分散）されます。
+  - model_name: dccai-low
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_1
+      rpm: 60
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  - model_name: dccai-low
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_2
+      rpm: 60
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  - model_name: dccai-low
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_3
+      rpm: 60
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  - model_name: dccai-low
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_4
+      rpm: 60
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  - model_name: dccai-low
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_5
+      rpm: 60
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  # ---- High：重い課題向け。強力な大型モデル ----
+  # Cerebras と DeepSeek V3 (Featherless) を並列で負荷分散（ラウンドロビン）
+  - model_name: dccai-high
+    litellm_params:
+      model: cerebras/llama-3.3-70b
+      api_key: os.environ/CEREBRAS_API_KEY
+      rpm: 30
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  - model_name: dccai-high
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V3-0324
+      api_base: https://api.featherless.ai/v1
+      api_key: os.environ/FEATHERLESS_API_KEY
+      rpm: 30
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  # ---- Backup Low：Geminiが使えない時のフェイルオーバー ----
+  - model_name: dccai-backup-low
+    litellm_params:
+      model: openai/Qwen/Qwen2.5-7B-Instruct
+      api_base: https://api.featherless.ai/v1
+      api_key: os.environ/FEATHERLESS_API_KEY
+      rpm: 60
+    model_info: { input_cost_per_token: 0, output_cost_per_token: 0 }
+
+litellm_settings:
+  num_retries: 2
+  request_timeout: 600
+  # High（Cerebras & DeepSeek並列）が両方失敗したら Low(Gemini) へ。Lowが失敗したら Backup Low(Qwen) へ。
+  fallbacks: [{"dccai-high": ["dccai-low"]}, {"dccai-low": ["dccai-backup-low"]}]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY   # Open WebUI(Pipe) からの認証キー
+
+router_settings:
+  # 失敗したデプロイ(=APIキー)を一定時間ルーティングから外す。
+  # cooldown_time 経過後に自動で再挑戦されるので、キーが復活すれば勝手に戻る。
+  allowed_fails: 1
+  cooldown_time: 300
+  # 403(BadRequest)や認証エラーも「別キーで再試行」する。既定ではリトライされない。
+  retry_policy:
+    BadRequestErrorRetries: 3
+    AuthenticationErrorRetries: 3
+    RateLimitErrorRetries: 2
+    TimeoutErrorRetries: 2
+    InternalServerErrorRetries: 2
+  allowed_fails_policy:
+    BadRequestErrorAllowedFails: 1
+    AuthenticationErrorAllowedFails: 1

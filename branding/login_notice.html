@@ -1,0 +1,53 @@
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const NOTICE_ID = 'dcc-login-notice';
+  const apply = () => {
+    if (location.pathname !== '/auth') {
+      const ex = document.getElementById(NOTICE_ID);
+      if (ex) ex.remove();
+      return;
+    }
+    // 1) 左上の OpenWebUI ロゴを DCC の D に差し替え（＝OI を消す）
+    document.querySelectorAll('img[src*="favicon"]').forEach((img) => {
+      const r = img.getBoundingClientRect();
+      if (r.top < 160 && r.left < 260 && r.width > 0 && r.width < 64) {
+        if (!img.src.includes('/static/favicon.png?v=dcc1')) img.src = '/static/favicon.png?v=dcc1';
+        img.style.borderRadius = '0';
+      }
+    });
+    // 2) 注意書きカードを注入
+    if (!document.getElementById(NOTICE_ID)) {
+      const container =
+        document.querySelector('.flex.flex-col.items-center.justify-center') || document.body;
+      const authBlock = container && container.querySelector('[class*="max-w"]');
+      const notice = document.createElement('div');
+      notice.id = NOTICE_ID;
+      notice.style.cssText =
+        'width:100%;display:flex;justify-content:center;padding:0 16px;box-sizing:border-box;';
+      notice.innerHTML =
+        '<div style="max-width:430px;width:100%;margin:32px auto 0;padding:18px 20px;' +
+        'background:rgba(255,255,255,0.035);border:1px solid rgba(255,255,255,0.09);' +
+        'border-radius:16px;font-size:0.82rem;color:#b7b7bf;line-height:1.75;">' +
+        '<div style="display:flex;align-items:center;gap:7px;margin-bottom:11px;font-weight:600;' +
+        'color:#ededf2;font-size:0.9rem;letter-spacing:.02em;">' +
+        '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#c9a86a" ' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;">' +
+        '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/>' +
+        '<line x1="12" y1="16" x2="12.01" y2="16"/></svg>ご利用上の注意</div>' +
+        '<ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:9px;">' +
+        '<li style="display:flex;gap:9px;"><span style="color:#c9a86a;flex:none;">•</span>' +
+        '<span>本システムは <b style="color:#dddde3;font-weight:600;">DCC部員専用</b> です。' +
+        'DCC の Discord サーバーに参加している必要があります。</span></li>' +
+        '<li style="display:flex;gap:9px;"><span style="color:#c9a86a;flex:none;">•</span>' +
+        '<span>現在開発中のため、チャット履歴が消えたり、予告なく仕様が変わる場合があります。</span></li>' +
+        '<li style="display:flex;gap:9px;"><span style="color:#c9a86a;flex:none;">•</span>' +
+        '<span>通信は暗号化されており、入力内容を管理者が閲覧することはありません。</span></li>' +
+        '</ul></div>';
+      if (authBlock && authBlock.parentNode)
+        authBlock.parentNode.insertBefore(notice, authBlock.nextSibling);
+      else if (container) container.appendChild(notice);
+    }
+  };
+  setInterval(apply, 400);
+});
+</script>

@@ -1,0 +1,32 @@
+model_list:
+  # ---- Low：既定・全員・高速。日常の質問はこれ ----
+  - model_name: dccai-low
+    litellm_params:
+      # featherless は OpenAI 互換。'openai/' + featherless のモデルID
+      model: openai/Qwen/Qwen2.5-7B-Instruct
+      api_base: https://api.featherless.ai/v1
+      api_key: os.environ/FEATHERLESS_API_KEY
+      rpm: 60                      # モデル全体の 1 分あたり上限（保険）
+    model_info:
+      input_cost_per_token: 0      # フラット料金なのでコストは 0 扱い
+      output_cost_per_token: 0
+
+  # ---- High：重い課題向け。強力な大型モデル ----
+  - model_name: dccai-high
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-R1-0528
+      api_base: https://api.featherless.ai/v1
+      api_key: os.environ/FEATHERLESS_API_KEY
+      rpm: 30
+    model_info:
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
+litellm_settings:
+  num_retries: 2
+  request_timeout: 600
+  # High が失敗・過負荷なら自動で Low に流す
+  fallbacks: [{"dccai-high": ["dccai-low"]}]
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY   # Open WebUI(Pipe) からの認証キー

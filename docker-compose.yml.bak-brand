@@ -1,0 +1,30 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    depends_on:
+      - litellm
+    ports:
+      - "3000:8080"                # 前段のリバースプロキシから 3000 へ
+    volumes:
+      - open-webui:/app/backend/data
+    env_file:
+      - ./open-webui.env
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    # ポートは外部公開せず、open-webui からのみ内部ネットワークで到達
+    expose:
+      - "4000"
+    restart: unless-stopped
+
+volumes:
+  open-webui: {}

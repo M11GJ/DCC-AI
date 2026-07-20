@@ -1,0 +1,8 @@
+.env
+open-webui.env
+worker/config.json
+*.log
+backups/
+__pycache__/
+*.pyc
+searxng/secret_key
