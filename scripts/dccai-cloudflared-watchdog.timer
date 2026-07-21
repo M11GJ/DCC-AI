@@ -1,0 +1,10 @@
+[Unit]
+Description=DCC AI Cloudflared Watchdog Timer (every 5 min)
+Requires=dccai-cloudflared-watchdog.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
