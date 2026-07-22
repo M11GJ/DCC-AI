@@ -44,6 +44,10 @@ class Pipe:
         LOW_UPSTREAM: str = Field(
             default="dccai-low", description="LiteLLM 側の Low モデル名"
         )
+        VISION_UPSTREAM: str = Field(
+            default="dccai-low-legacy",
+            description="画像のネイティブ解析に使うLiteLLM側モデル名（マルチモーダル対応必須。dccai-lowはDeepSeek優先になったため、Geminiプール(dccai-low-legacy)を直接指定する）",
+        )
         MAX_CONCURRENCY: int = Field(
             default=3,
             description="同時に生成する上限。featherless の同時接続数(4)より少し下げて枠に余裕を持たせる",
@@ -189,6 +193,7 @@ class Pipe:
 
         # ---- 画像インターセプト (ローカルOllamaでテキスト化) ----
         processed_messages = []
+        low_has_image = False
         for msg in messages:
             content = msg.get("content", "")
             
@@ -232,13 +237,13 @@ class Pipe:
                     vision_text = ""
                     try:
                         async with httpx.AsyncClient(timeout=120) as client:
-                            # 1. まず Gemini (Low_UPSTREAM) に投げて画像解析を試みる
+                            # 1. まず Gemini (VISION_UPSTREAM) に投げて画像解析を試みる
                             gemini_content = [{"type": "text", "text": self.valves.VISION_PROMPT}]
                             for b64 in images_to_process:
                                 gemini_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-                            
+
                             gemini_payload = {
-                                "model": self.valves.LOW_UPSTREAM,
+                                "model": self.valves.VISION_UPSTREAM,
                                 "messages": [{"role": "user", "content": gemini_content}],
                                 "stream": False
                             }
@@ -273,7 +278,9 @@ class Pipe:
                     combined_text += f"\n\n[添付画像の説明: {vision_text}]\n"
                     processed_messages.append({**msg, "content": combined_text})
                 else:
-                    # Low (Gemini) はマルチモーダルネイティブ対応なのでOllamaを使わずそのまま送る
+                    # Low側は dccai-low が必ずしもマルチモーダル対応とは限らない(DeepSeek優先のため)
+                    # ネイティブ対応の VISION_UPSTREAM (Gemini) へ直接送る
+                    low_has_image = True
                     content_list = [{"type": "text", "text": combined_text}]
                     for b64 in images_to_process:
                         content_list.append({
@@ -283,8 +290,10 @@ class Pipe:
                     processed_messages.append({**msg, "content": content_list})
             else:
                 processed_messages.append({**msg, "content": combined_text})
-        
+
         messages = processed_messages
+        if not is_high and low_has_image:
+            upstream = self.valves.VISION_UPSTREAM
 
         payload = {
             "model": upstream,
