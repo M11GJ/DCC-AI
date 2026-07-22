@@ -38,7 +38,7 @@ def alive(key):
 def block(name):
     match = re.match(r'GEMINI_API_KEY_(\d+)', name)
     label = f"Gemini Key {match.group(1)}" if match else name
-    return ("  - model_name: dccai-low\n"
+    return ("  - model_name: dccai-low-legacy\n"
             "    litellm_params:\n"
             f"      model: gemini/{MODEL}\n"
             f"      api_key: os.environ/{name}\n"

@@ -27,7 +27,6 @@ services:
       - GEMINI_API_KEY_4=${GEMINI_API_KEY_4}
       - GEMINI_API_KEY_5=${GEMINI_API_KEY_5}
       - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
     ports:
       - "127.0.0.1:4000:4000"
@@ -36,7 +35,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: dccai-cloudflared
-    command: tunnel --no-autoupdate run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMmUyZGFhNTgtZTFjOS00OGJiLWIyY2QtNTYwNzI4YTM5MWYzIiwicyI6Ik5UZ3pOMll4TWpZdFl6YzBPQzAwT0RoaUxXSXpPVGN0TkRNd09Ea3pPVGM1TURnNCJ9
+    command: tunnel --no-autoupdate run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMTg2OGJjZjktMjJiNC00ZmU3LTliZjYtMzE1MjY2ZjJjYzczIiwicyI6IlpESm1PREJqTkdRdE5qWmtPUzAwWmpKa0xXRXlNRFF0WWpCalpEWXpZMk5rWlRGaSJ9
     network_mode: host
     restart: unless-stopped
 

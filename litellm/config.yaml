@@ -1,26 +1,34 @@
 model_list:
-  # ---- Low：既定・全員・高速。日常の質問はこれ ----
+  # ---- Low：既定・全員・高速。まず DeepSeek v4-flash、失敗時は Gemini プールへ ----
+  - model_name: dccai-low
+    litellm_params:
+      model: deepseek/deepseek-v4-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 60
+    model_info: { id: "DeepSeek V4 Flash", input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  # ---- Low(フォールバック)：Gemini プール ----
   # ※LiteLLMの機能で、同じmodel_nameを複数書くと自動的にラウンドロビン（並列負荷分散）されます。
   # >>> GEMINI_LOW_START (gemini-key-health が自動管理。手動編集しないこと) <<<
-  - model_name: dccai-low
+  - model_name: dccai-low-legacy
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_1
       rpm: 60
     model_info: { id: "Gemini Key 1", input_cost_per_token: 0, output_cost_per_token: 0 }
-  - model_name: dccai-low
+  - model_name: dccai-low-legacy
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_2
       rpm: 60
     model_info: { id: "Gemini Key 2", input_cost_per_token: 0, output_cost_per_token: 0 }
-  - model_name: dccai-low
+  - model_name: dccai-low-legacy
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_3
       rpm: 60
     model_info: { id: "Gemini Key 3", input_cost_per_token: 0, output_cost_per_token: 0 }
-  - model_name: dccai-low
+  - model_name: dccai-low-legacy
     litellm_params:
       model: gemini/gemini-3.1-flash-lite
       api_key: os.environ/GEMINI_API_KEY_4
@@ -28,16 +36,23 @@ model_list:
     model_info: { id: "Gemini Key 4", input_cost_per_token: 0, output_cost_per_token: 0 }
   # >>> GEMINI_LOW_END <<<
 
-  # ---- High：重い課題向け。強力な大型モデル ----
-  # Cerebras と DeepSeek V3 (Featherless) を並列で負荷分散（ラウンドロビン）
+  # ---- High：重い課題向け。まず DeepSeek v4-pro、失敗時は旧Highプールへ ----
   - model_name: dccai-high
+    litellm_params:
+      model: deepseek/deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY
+      rpm: 30
+    model_info: { id: "DeepSeek V4 Pro", input_cost_per_token: 0, output_cost_per_token: 0 }
+
+  # ---- High(フォールバック)：Cerebras と DeepSeek V3 (Featherless) を並列で負荷分散（ラウンドロビン） ----
+  - model_name: dccai-high-legacy
     litellm_params:
       model: cerebras/llama-3.3-70b
       api_key: os.environ/CEREBRAS_API_KEY
       rpm: 30
     model_info: { id: "Cerebras Llama-3.3-70b", input_cost_per_token: 0, output_cost_per_token: 0 }
 
-  - model_name: dccai-high
+  - model_name: dccai-high-legacy
     litellm_params:
       model: openai/deepseek-ai/DeepSeek-V3-0324
       api_base: https://api.featherless.ai/v1
@@ -57,8 +72,8 @@ model_list:
 litellm_settings:
   num_retries: 2
   request_timeout: 600
-  # High（Cerebras & DeepSeek並列）が両方失敗したら Low(Gemini) へ。Lowが失敗したら Backup Low(Qwen) へ。
-  fallbacks: [{"dccai-high": ["dccai-low"]}, {"dccai-low": ["dccai-backup-low"]}]
+  # High: まずDeepSeek v4-pro → 失敗したら旧Highプール(Cerebras&DeepSeek-V3) → Low(まずDeepSeek v4-flash) → Low legacy(Gemini) → Backup Low(Qwen)
+  fallbacks: [{"dccai-high": ["dccai-high-legacy"]}, {"dccai-high-legacy": ["dccai-low"]}, {"dccai-low": ["dccai-low-legacy"]}, {"dccai-low-legacy": ["dccai-backup-low"]}]
   callbacks: ["prometheus"]
   require_auth_for_metrics_endpoint: false
 
