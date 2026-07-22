@@ -301,6 +301,10 @@ class Pipe:
             "stream": body.get("stream", False),
             "user": user_id,  # LiteLLM 側の利用量集計・per-user 制御用
         }
+        if payload["stream"]:
+            # ストリーミング末尾にusageチャンクを含めてもらう(Open WebUI管理者ダッシュボードの
+            # トークン集計は、この形式のusageチャンクをSSEから拾って記録しているため必須)
+            payload["stream_options"] = {"include_usage": True}
         for k in ("temperature", "top_p", "max_tokens"):
             if body.get(k) is not None:
                 payload[k] = body[k]
