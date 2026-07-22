@@ -17,6 +17,8 @@ services:
     image: ghcr.io/berriai/litellm:main-stable
     container_name: litellm
     command: ["--config", "/app/config.yaml", "--port", "4000"]
+    depends_on:
+      - postgres
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     environment:
@@ -29,8 +31,22 @@ services:
       - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - DATABASE_URL=${DATABASE_URL}
     ports:
       - "127.0.0.1:4000:4000"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dccai-postgres
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=20"]
+    mem_limit: 256m
     restart: unless-stopped
 
   cloudflared:
@@ -80,3 +96,4 @@ volumes:
   open-webui: {}
   ollama: {}
   searxng-cache: {}
+  postgres-data: {}

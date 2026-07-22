@@ -79,3 +79,5 @@ litellm_settings:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY   # Open WebUI(Pipe) からの認証キー
+  database_url: os.environ/DATABASE_URL       # spend/トークン使用量の永続化用(Postgres)
+  store_model_in_db: false                    # モデル定義はconfig.yamlのみで管理(DBに二重管理させない)
