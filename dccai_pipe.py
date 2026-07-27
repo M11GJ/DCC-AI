@@ -3,7 +3,7 @@ title: DCC AI
 author: DCC
 version: 1.0.0
 license: MIT
-description: DCC部員向け DCC AI High/Low。順番待ちUI・High日次上限つきで LiteLLM 経由 featherless に中継。
+description: DCC部員向け DCC AI High/Low/Code。順番待ちUI・High日次上限つきで LiteLLM 経由 featherless 等に中継。
 requirements: httpx
 """
 import asyncio
@@ -19,14 +19,19 @@ import httpx
 from pydantic import BaseModel, Field
 
 # --- プロセス内で共有する同時実行の状態（順番待ち表示のため自前カウント） ---
-_STATE = {"sem": None, "cap": None, "active": 0, "waiting": 0}
+# グループ(モデル系統)ごとに別々のセマフォを持つ。上限が違うグループを同じ
+# セマフォで管理すると cap 変更のたびに作り直されて壊れるため分離している。
+# 例: Featherless上のGLM-5.2(dccai-code)はプラン側の同時実行上限が
+# High/Lowより大幅に低いため、専用の小さいcapで先にこちら側で順番待ちさせる。
+_STATE_BY_GROUP = {}
 
 
-def _get_sem(cap: int) -> asyncio.Semaphore:
-    if _STATE["sem"] is None or _STATE["cap"] != cap:
-        _STATE["sem"] = asyncio.Semaphore(cap)
-        _STATE["cap"] = cap
-    return _STATE["sem"]
+def _get_group_state(group: str, cap: int) -> dict:
+    st = _STATE_BY_GROUP.get(group)
+    if st is None or st["cap"] != cap:
+        st = {"sem": asyncio.Semaphore(cap), "cap": cap, "active": 0, "waiting": 0}
+        _STATE_BY_GROUP[group] = st
+    return st
 
 
 class Pipe:
@@ -44,13 +49,22 @@ class Pipe:
         LOW_UPSTREAM: str = Field(
             default="dccai-low", description="LiteLLM 側の Low モデル名"
         )
+        CODE_UPSTREAM: str = Field(
+            default="dccai-code", description="LiteLLM 側の Code モデル名(GLM-5.2, Featherless)"
+        )
         VISION_UPSTREAM: str = Field(
             default="dccai-low-legacy",
             description="画像のネイティブ解析に使うLiteLLM側モデル名（マルチモーダル対応必須。dccai-lowはDeepSeek優先になったため、Geminiプール(dccai-low-legacy)を直接指定する）",
         )
         MAX_CONCURRENCY: int = Field(
             default=3,
-            description="同時に生成する上限。featherless の同時接続数(4)より少し下げて枠に余裕を持たせる",
+            description="High/Lowの同時生成上限(DeepSeek公式APIが主経路のため実質rpm制限のみが効く)",
+        )
+        CODE_MAX_CONCURRENCY: int = Field(
+            default=1,
+            description="Codeモデル(GLM-5.2, Featherless)専用の同時生成上限。"
+            "Featherless側のプラン同時実行コストが高く(1リクエストで枠を使い切る)、"
+            "超えると429で即エラーになるため、High/Lowとは別枠でここで先に順番待ちさせる",
         )
         MAX_QUEUE_WAIT: int = Field(
             default=180,
@@ -63,6 +77,14 @@ class Pipe:
             default="/app/backend/data/dcc_ai_high_usage.json",
             description="High 利用回数の保存先（データボリューム内）",
         )
+        MONTHLY_TOKEN_LIMIT: int = Field(
+            default=10_000_000,
+            description="ユーザー1人あたりの月間トークン上限（High/Low/Code合算、WebUI/API合算、0で無制限）",
+        )
+        TOKEN_USAGE_FILE: str = Field(
+            default="/app/backend/data/dcc_ai_token_usage.json",
+            description="月間トークン使用量の保存先（データボリューム内）",
+        )
         SYSTEM_PROMPT: str = Field(
             default=(
                 "あなたは DCC（デジタルクリエイターズコミュニティ）の部員を支援する日本語アシスタント DCC AI です。"
@@ -72,9 +94,13 @@ class Pipe:
             ),
             description="共通システムプロンプト（空で無効）",
         )
-        REQUEST_TIMEOUT: int = Field(default=300, description="API タイムアウト秒")
+        REQUEST_TIMEOUT: int = Field(
+            default=1200,
+            description="API タイムアウト秒。GLM-5.2(Code)は長い推論で数百秒かかることが"
+            "実測されている(最大845秒観測)ため、litellm側のrequest_timeoutより長めに余裕を持たせている",
+        )
         OLLAMA_BASE_URL: str = Field(
-            default="http://ollama:11434",
+            default="http://100.80.194.51:11434",
             description="画像処理用ローカルOllamaのURL",
         )
         VISION_MODEL: str = Field(
@@ -112,6 +138,16 @@ class Pipe:
                     }
                 }
             },
+            {
+                "id": "dccai-code",
+                "name": "DCC AI Code",
+                "meta": {
+                    "vision": False,
+                    "capabilities": {
+                        "citations": False
+                    }
+                }
+            },
         ]
 
     # ---- High 日次利用回数の簡易カウンタ（ファイル保存） ----
@@ -142,6 +178,36 @@ class Pipe:
         data[today][user_id] = data[today].get(user_id, 0) + 1
         self._save_usage(data)
 
+    # ---- 月間トークン使用量カウンタ（ファイル保存） ----
+    def _load_token_usage(self) -> dict:
+        try:
+            with open(self.valves.TOKEN_USAGE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_token_usage(self, data: dict) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.valves.TOKEN_USAGE_FILE), exist_ok=True)
+            with open(self.valves.TOKEN_USAGE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
+    def _month_tokens_used(self, user_id: str) -> int:
+        data = self._load_token_usage()
+        month = date.today().strftime("%Y-%m")
+        return int(data.get(month, {}).get(user_id, 0))
+
+    def _add_tokens(self, user_id: str, n: int) -> None:
+        if n <= 0:
+            return
+        data = self._load_token_usage()
+        month = date.today().strftime("%Y-%m")
+        data = {month: data.get(month, {})}  # 当月分だけ残して掃除
+        data[month][user_id] = data[month].get(user_id, 0) + n
+        self._save_token_usage(data)
+
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.valves.LITELLM_API_KEY}",
@@ -153,6 +219,7 @@ class Pipe:
         body: dict,
         __user__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[Any], Awaitable[None]]] = None,
+        __metadata__: Optional[dict] = None,
     ):
         async def status(desc: str, done: bool = False):
             if __event_emitter__:
@@ -165,16 +232,37 @@ class Pipe:
 
         user_id = (__user__ or {}).get("id") or (__user__ or {}).get("email") or "unknown"
 
+        # WebUI経由のリクエストは必ず chat_id を持つ(main.py の is_new_chat 判定に基づく)。
+        # 素のOpenAI互換API呼び出し(chat_id/parent_id無し)はここが空になるため、
+        # litellm側の集計(end_user_id)を "<user_id>:api" として分離する。
+        is_api_call = not (__metadata__ or {}).get("chat_id")
+        litellm_user_id = f"{user_id}:api" if is_api_call else user_id
+
+        # ---- 月間トークン上限チェック（High/Low/Code・WebUI/API合算、モデル選択より前に判定） ----
+        if self.valves.MONTHLY_TOKEN_LIMIT > 0:
+            if self._month_tokens_used(user_id) >= self.valves.MONTHLY_TOKEN_LIMIT:
+                return (
+                    f"今月の DCC AI 利用上限（{self.valves.MONTHLY_TOKEN_LIMIT:,} トークン）に達しました。"
+                    "来月また使えます。"
+                )
+
         # 選択モデル（"dccai.dccai-high-vision" のように prefix が付くので末尾で判定）
         raw_model = str(body.get("model", ""))
         model_suffix = raw_model.rsplit(".", 1)[-1].lower()
         
         is_high = False
-        if "high" in model_suffix:
+        is_code = False
+        if "code" in model_suffix:
+            upstream = self.valves.CODE_UPSTREAM
+            is_code = True
+        elif "high" in model_suffix:
             upstream = self.valves.HIGH_UPSTREAM
             is_high = True
         else:
             upstream = self.valves.LOW_UPSTREAM
+
+        concurrency_group = "code" if is_code else "default"
+        concurrency_cap = self.valves.CODE_MAX_CONCURRENCY if is_code else self.valves.MAX_CONCURRENCY
 
         # ---- High の 1 日上限チェック ----
         if is_high and self.valves.HIGH_DAILY_LIMIT > 0:
@@ -299,7 +387,7 @@ class Pipe:
             "model": upstream,
             "messages": messages,
             "stream": body.get("stream", False),
-            "user": user_id,  # LiteLLM 側の利用量集計・per-user 制御用
+            "user": litellm_user_id,  # LiteLLM 側の利用量集計・per-user 制御用(WebUI/APIを分離)
         }
         if payload["stream"]:
             # ストリーミング末尾にusageチャンクを含めてもらう(Open WebUI管理者ダッシュボードの
@@ -310,17 +398,19 @@ class Pipe:
                 payload[k] = body[k]
 
         # ---- 同時実行セマフォ＋順番待ちの見える化（④） ----
-        sem = _get_sem(self.valves.MAX_CONCURRENCY)
-        must_wait = _STATE["active"] >= self.valves.MAX_CONCURRENCY
+        # グループ(default=High/Low, code=GLM-5.2)ごとに別セマフォ・別カウンタを使う
+        state = _get_group_state(concurrency_group, concurrency_cap)
+        sem = state["sem"]
+        must_wait = state["active"] >= concurrency_cap
         if must_wait:
-            _STATE["waiting"] += 1
-            ahead = _STATE["active"] + _STATE["waiting"] - 1
+            state["waiting"] += 1
+            ahead = state["active"] + state["waiting"] - 1
             await status(f"🕒 混雑しています。順番待ち中…（あなたの前に約 {ahead} 件）", False)
         await sem.acquire()
         if must_wait:
-            _STATE["waiting"] -= 1
+            state["waiting"] -= 1
             await status("✅ 順番が来ました。生成を開始します。", True)
-        _STATE["active"] += 1
+        state["active"] += 1
 
         url = f"{self.valves.LITELLM_BASE_URL}/chat/completions"
         headers = self._headers()
@@ -342,6 +432,7 @@ class Pipe:
                 async def event_stream():
                     waited = 0.0
                     started = False
+                    captured_tokens = 0
                     try:
                         async with httpx.AsyncClient(timeout=timeout) as client:
                             while True:
@@ -369,6 +460,16 @@ class Pipe:
                                             await status("✅ 生成を開始します。", True)
                                         async for line in r.aiter_lines():
                                             if line:
+                                                if line.startswith("data:"):
+                                                    data_str = line[5:].strip()
+                                                    if data_str and data_str != "[DONE]":
+                                                        try:
+                                                            chunk = json.loads(data_str)
+                                                            chunk_usage = chunk.get("usage")
+                                                            if chunk_usage and chunk_usage.get("total_tokens"):
+                                                                captured_tokens = chunk_usage["total_tokens"]
+                                                        except Exception:
+                                                            pass
                                                 yield line + "\n"
                                         return
                                 except (
@@ -384,7 +485,9 @@ class Pipe:
                                     waited += 3.0
                                     continue
                     finally:
-                        _STATE["active"] -= 1
+                        if captured_tokens:
+                            self._add_tokens(user_id, captured_tokens)
+                        state["active"] -= 1
                         sem.release()
 
                 return event_stream()
@@ -405,17 +508,21 @@ class Pipe:
                             continue
                         if r.status_code != 200:
                             return f"Error {r.status_code}: {r.text}"
+                        resp_json = r.json()
+                        usage = resp_json.get("usage") or {}
+                        if usage.get("total_tokens"):
+                            self._add_tokens(user_id, usage["total_tokens"])
                         count_high()
                         await status("✅ 生成しました。", True)
-                        return r.json()
+                        return resp_json
             finally:
-                _STATE["active"] -= 1
+                state["active"] -= 1
                 sem.release()
 
         except Exception as e:
             # ストリーミング開始前の例外時はここでスロット解放
-            if _STATE["active"] > 0:
-                _STATE["active"] -= 1
+            if state["active"] > 0:
+                state["active"] -= 1
                 try:
                     sem.release()
                 except Exception:

@@ -60,6 +60,15 @@ model_list:
       rpm: 30
     model_info: { id: "DeepSeek-V3 (Featherless)", input_cost_per_token: 0, output_cost_per_token: 0 }
 
+  # ---- Code：コーディング用途。GLM-5.2 (Featherless) ----
+  - model_name: dccai-code
+    litellm_params:
+      model: openai/zai-org/GLM-5.2
+      api_base: https://api.featherless.ai/v1
+      api_key: os.environ/FEATHERLESS_API_KEY
+      rpm: 30
+    model_info: { id: "GLM-5.2 (Featherless)", input_cost_per_token: 0, output_cost_per_token: 0 }
+
   # ---- Backup Low：Geminiが使えない時のフェイルオーバー ----
   - model_name: dccai-backup-low
     litellm_params:
@@ -71,9 +80,9 @@ model_list:
 
 litellm_settings:
   num_retries: 2
-  request_timeout: 600
+  request_timeout: 1200  # GLM-5.2(Code)は長い推論で最大845秒観測されているため延長
   # High: まずDeepSeek v4-pro → 失敗したら旧Highプール(Cerebras&DeepSeek-V3) → Low(まずDeepSeek v4-flash) → Low legacy(Gemini) → Backup Low(Qwen)
-  fallbacks: [{"dccai-high": ["dccai-high-legacy"]}, {"dccai-high-legacy": ["dccai-low"]}, {"dccai-low": ["dccai-low-legacy"]}, {"dccai-low-legacy": ["dccai-backup-low"]}]
+  fallbacks: [{"dccai-high": ["dccai-high-legacy"]}, {"dccai-high-legacy": ["dccai-low"]}, {"dccai-low": ["dccai-low-legacy"]}, {"dccai-low-legacy": ["dccai-backup-low"]}, {"dccai-code": ["dccai-high"]}]
   callbacks: ["prometheus"]
   require_auth_for_metrics_endpoint: false
 

@@ -11,6 +11,7 @@ services:
       - open-webui:/app/backend/data
     env_file:
       - ./open-webui.env
+    mem_limit: 1536m
     restart: unless-stopped
 
   litellm:
@@ -34,6 +35,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
     ports:
       - "127.0.0.1:4000:4000"
+    mem_limit: 2048m
     restart: unless-stopped
 
   postgres:
@@ -52,8 +54,9 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: dccai-cloudflared
-    command: tunnel --no-autoupdate run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMmUyZGFhNTgtZTFjOS00OGJiLWIyY2QtNTYwNzI4YTM5MWYzIiwicyI6Ik5UZ3pOMll4TWpZdFl6YzBPQzAwT0RoaUxXSXpPVGN0TkRNd09Ea3pPVGM1TURnNCJ9
+    command: tunnel --no-autoupdate --protocol http2 run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMmUyZGFhNTgtZTFjOS00OGJiLWIyY2QtNTYwNzI4YTM5MWYzIiwicyI6Ik5UZ3pOMll4TWpZdFl6YzBPQzAwT0RoaUxXSXpPVGN0TkRNd09Ea3pPVGM1TURnNCJ9
     network_mode: host
+    mem_limit: 256m
     restart: unless-stopped
 
   dashboard:
@@ -68,21 +71,34 @@ services:
       - LITELLM_METRICS_URL=http://litellm:4000/metrics/
     ports:
       - "3001:3001"
+    mem_limit: 128m
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
+  usage:
+    image: python:3.11-slim
+    container_name: dccai-usage
     volumes:
-      - ollama:/root/.ollama
+      - ./scripts/usage_page.py:/app/usage_page.py:ro
+      - open-webui:/webui-data:ro
+    command: python3 /app/usage_page.py
+    environment:
+      - PORT=3002
+      - PUBLIC_BASE_URL=https://usage.shu-dcc.net
+      - REQUIRED_GUILD_ID=1304292402386964502
+      - WEBUI_DB_PATH=/webui-data/webui.db
+      - LITELLM_BASE_URL=http://litellm:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
+      - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
+      - USAGE_SESSION_SECRET=${USAGE_SESSION_SECRET}
+    ports:
+      - "3002:3002"
+    mem_limit: 256m
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+
+  # ollama:
+  #   旧ホスト(desktop-1f999hf, RTX 4060)に残置。GPU無しのgunkでは実行しない
+  #   dccai_pipe.py の OLLAMA_BASE_URL を http://100.80.194.51:11434 に向けて利用
 
   searxng:
     image: searxng/searxng:latest
@@ -90,10 +106,10 @@ services:
     volumes:
       - ./searxng:/etc/searxng
       - searxng-cache:/var/cache/searxng
+    mem_limit: 512m
     restart: unless-stopped
 
 volumes:
   open-webui: {}
-  ollama: {}
   searxng-cache: {}
   postgres-data: {}
