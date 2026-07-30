@@ -3,7 +3,9 @@
 DCC AI - Usage Page Server
 Discordログイン(独自OAuth2、既存のDiscordアプリを再利用)で本人確認し、
 自分のトークン消費量(WebUI分/API分の内訳)を表示する。
-Python標準ライブラリのみで構成(追加パッケージ不要)。
+集計データはlitellmのREST /spend/logs(limit/end_user_idフィルタが効かず
+毎回全件をmessages/response列込みで返すため極端に遅い)を経由せず、
+同じdocker network上のPostgresへpsycopg2で直接問い合わせる。
 """
 import base64
 import hashlib
@@ -20,6 +22,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from http import cookies
 
+import psycopg2
+import psycopg2.extras
+
 JST = timezone(timedelta(hours=9))
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -32,7 +37,18 @@ SESSION_SECRET = os.environ.get("USAGE_SESSION_SECRET", "")
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://litellm:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 WEBUI_DB_PATH = os.environ.get("WEBUI_DB_PATH", "/webui-data/webui.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 SESSION_TTL = 6 * 3600
+
+
+def _pg_query(sql, params=None):
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 COOKIE_NAME = "dccai_usage_session"
 
@@ -124,33 +140,30 @@ def litellm_total_and_by_model(litellm_user_id: str):
     """litellmのend_user_idで直接集計する。WebUI分は<user_id>、API分は
     <user_id>:api として dccai_pipe.py 側で送信時に分離タグ付けされている
     (main.pyのchat_id有無で判定、詳細はdccai_pipe.py参照)。
+    end_userにインデックスがあるPostgresへ直接問い合わせる(旧: litellmの
+    /spend/logs?end_user_id=... はフィルタが効かず全件返るため使わない)。
     """
-    url = (
-        f"{LITELLM_BASE_URL}/spend/logs?"
-        f"end_user_id={urllib.parse.quote(litellm_user_id)}&limit=1000"
-    )
-    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
     try:
-        logs = http_get_json(url, headers)
+        rows = _pg_query(
+            'SELECT model_group, model, total_tokens FROM "LiteLLM_SpendLogs" WHERE end_user = %s',
+            (litellm_user_id,),
+        )
     except Exception:
         return 0, {}
     total = 0
     by_model = {}
-    for entry in logs:
-        # end_user_id はサーバ側フィルタに加えて念のためクライアント側でも確認する
-        if entry.get("end_user") != litellm_user_id:
-            continue
-        tokens = entry.get("total_tokens", 0) or 0
+    for row in rows:
+        tokens = row.get("total_tokens", 0) or 0
         total += tokens
-        model = entry.get("model_group") or entry.get("model") or "unknown"
+        model = row.get("model_group") or row.get("model") or "unknown"
         by_model[model] = by_model.get(model, 0) + tokens
     return total, by_model
 
 
-# /spend/logs は club規模の想定に反してログが数万件まで増えており、素の取得だけで
-# 十数秒・数十MBかかる(litellmの limit パラメータは効いていない模様)。管理者ページは
-# 1回の表示で複数の集計関数を呼ぶため、キャッシュ無しだと呼んだ回数分そのまま重くなり
-# タイムアウトの原因になっていた。短TTLでプロセス内キャッシュして呼び出しを1回に潰す。
+# litellmの/spend/logsはlimit/end_user_idフィルタが効かず、messages/response列込みで
+# 毎回全件(club規模の想定を超え数万件・90MB超)返してくるため使わない。Postgresへ
+# 必要な列だけ直接問い合わせる(体感0.1秒程度、旧実装は9〜14秒)。管理者ページは1回の
+# 表示で複数の集計関数を呼ぶため、それでも短TTLでプロセス内キャッシュして呼び出しを1回に潰す。
 _SPEND_LOGS_CACHE = {"logs": None, "ts": 0.0}
 _SPEND_LOGS_TTL_SEC = 60
 
@@ -159,11 +172,9 @@ def _fetch_all_spend_logs():
     now = time.time()
     if _SPEND_LOGS_CACHE["logs"] is not None and (now - _SPEND_LOGS_CACHE["ts"]) < _SPEND_LOGS_TTL_SEC:
         return _SPEND_LOGS_CACHE["logs"]
-    url = f"{LITELLM_BASE_URL}/spend/logs?limit=5000"
-    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-    # ログ件数が club規模の想定を超えて増えており、単発の取得自体が10秒を超えることがある
-    # (実測9〜14秒)。デフォルトの10秒タイムアウトだとここで頻繁に失敗するため長めに取る。
-    logs = http_get_json(url, headers, timeout=45)
+    logs = _pg_query(
+        'SELECT end_user, model_group, model, total_tokens, "startTime" FROM "LiteLLM_SpendLogs"'
+    )
     _SPEND_LOGS_CACHE["logs"] = logs
     _SPEND_LOGS_CACHE["ts"] = now
     return logs
@@ -240,13 +251,12 @@ def litellm_daily_ranking(date_str):
 
     per_user = {}
     for entry in logs:
-        raw_time = entry.get("startTime")
-        if not raw_time:
+        t = entry.get("startTime")
+        if not t:
             continue
-        try:
-            t = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-        except ValueError:
-            continue
+        # PostgresのtimestampはUTCで格納されているがtzinfo無しで返るため付与する
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
         if not (start_utc <= t < end_utc):
             continue
         end_user = entry.get("end_user") or "(unknown)"

@@ -77,10 +77,15 @@ services:
   usage:
     image: python:3.11-slim
     container_name: dccai-usage
+    depends_on:
+      - postgres
     volumes:
       - ./scripts/usage_page.py:/app/usage_page.py:ro
       - open-webui:/webui-data:ro
-    command: python3 /app/usage_page.py
+    # litellmの/spend/logsはlimit/end_user_idフィルタが効かず全件(messages/response列込みで
+    # 90MB超)返してくるため使わず、Postgresへ直接SQLで問い合わせる。psycopg2-binaryはビルド不要
+    # なのでpython:3.11-slimでもpip installだけで動く。
+    command: sh -c "pip install --quiet --no-cache-dir psycopg2-binary && python3 /app/usage_page.py"
     environment:
       - PORT=3002
       - PUBLIC_BASE_URL=https://usage.shu-dcc.net
@@ -88,6 +93,7 @@ services:
       - WEBUI_DB_PATH=/webui-data/webui.db
       - LITELLM_BASE_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - DATABASE_URL=${DATABASE_URL}
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
       - USAGE_SESSION_SECRET=${USAGE_SESSION_SECRET}
