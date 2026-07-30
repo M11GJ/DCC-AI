@@ -7,6 +7,7 @@ description: DCC部員向け DCC AI High/Low/Code。順番待ちUI・High日次�
 requirements: httpx
 """
 import asyncio
+import fcntl
 import json
 import os
 import re
@@ -171,12 +172,39 @@ class Pipe:
         today = date.today().isoformat()
         return int(data.get(today, {}).get(user_id, 0))
 
+    # ---- ファイルベースカウンタの排他ロック付きread-modify-write ----
+    # ロック無しだと、High/Low/Codeの同時実行(セマフォで最大数件が並行)で
+    # 複数リクエストがほぼ同時にカウンタを更新した際、後勝ちで前の更新が
+    # 消える(lost update)。実際にこれが原因で月間トークンカウンタが実測の
+    # 3割程度しか記録されない事例が発生したため、flockで直列化する。
+    def _locked_rmw(self, path: str, mutate) -> None:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path + ".lock", "a+") as lockf:
+                fcntl.flock(lockf, fcntl.LOCK_EX)
+                try:
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = {}
+                    data = mutate(data)
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(data, f)
+                finally:
+                    fcntl.flock(lockf, fcntl.LOCK_UN)
+        except Exception:
+            pass
+
     def _incr_high(self, user_id: str) -> None:
-        data = self._load_usage()
         today = date.today().isoformat()
-        data = {today: data.get(today, {})}  # 当日分だけ残して掃除
-        data[today][user_id] = data[today].get(user_id, 0) + 1
-        self._save_usage(data)
+
+        def mutate(data):
+            data = {today: data.get(today, {})}  # 当日分だけ残して掃除
+            data[today][user_id] = data[today].get(user_id, 0) + 1
+            return data
+
+        self._locked_rmw(self.valves.USAGE_FILE, mutate)
 
     # ---- 月間トークン使用量カウンタ（ファイル保存） ----
     def _load_token_usage(self) -> dict:
@@ -186,14 +214,6 @@ class Pipe:
         except Exception:
             return {}
 
-    def _save_token_usage(self, data: dict) -> None:
-        try:
-            os.makedirs(os.path.dirname(self.valves.TOKEN_USAGE_FILE), exist_ok=True)
-            with open(self.valves.TOKEN_USAGE_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-        except Exception:
-            pass
-
     def _month_tokens_used(self, user_id: str) -> int:
         data = self._load_token_usage()
         month = date.today().strftime("%Y-%m")
@@ -202,11 +222,14 @@ class Pipe:
     def _add_tokens(self, user_id: str, n: int) -> None:
         if n <= 0:
             return
-        data = self._load_token_usage()
         month = date.today().strftime("%Y-%m")
-        data = {month: data.get(month, {})}  # 当月分だけ残して掃除
-        data[month][user_id] = data[month].get(user_id, 0) + n
-        self._save_token_usage(data)
+
+        def mutate(data):
+            data = {month: data.get(month, {})}  # 当月分だけ残して掃除
+            data[month][user_id] = data[month].get(user_id, 0) + n
+            return data
+
+        self._locked_rmw(self.valves.TOKEN_USAGE_FILE, mutate)
 
     def _headers(self) -> dict:
         return {
