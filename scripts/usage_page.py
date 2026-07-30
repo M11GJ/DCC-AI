@@ -79,11 +79,11 @@ def read_session(cookie_header: str):
 USER_AGENT = "DccaiUsagePage (https://usage.shu-dcc.net, 1.0)"
 
 
-def http_get_json(url, headers=None):
+def http_get_json(url, headers=None, timeout=10):
     base_headers = {"User-Agent": USER_AGENT}
     base_headers.update(headers or {})
     req = urllib.request.Request(url, headers=base_headers)
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
@@ -161,7 +161,9 @@ def _fetch_all_spend_logs():
         return _SPEND_LOGS_CACHE["logs"]
     url = f"{LITELLM_BASE_URL}/spend/logs?limit=5000"
     headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-    logs = http_get_json(url, headers)
+    # ログ件数が club規模の想定を超えて増えており、単発の取得自体が10秒を超えることがある
+    # (実測9〜14秒)。デフォルトの10秒タイムアウトだとここで頻繁に失敗するため長めに取る。
+    logs = http_get_json(url, headers, timeout=45)
     _SPEND_LOGS_CACHE["logs"] = logs
     _SPEND_LOGS_CACHE["ts"] = now
     return logs
