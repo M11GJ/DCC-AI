@@ -147,13 +147,29 @@ def litellm_total_and_by_model(litellm_user_id: str):
     return total, by_model
 
 
-def litellm_all_users_grouped():
-    """管理者用: 全ログを end_user 単位(WebUI/APIタグを分離)で集計する。
-    このデプロイ全体のログ件数が小さい(club規模)前提で、フィルタ無しの一括取得+
-    Python側集計にしている。"""
+# /spend/logs は club規模の想定に反してログが数万件まで増えており、素の取得だけで
+# 十数秒・数十MBかかる(litellmの limit パラメータは効いていない模様)。管理者ページは
+# 1回の表示で複数の集計関数を呼ぶため、キャッシュ無しだと呼んだ回数分そのまま重くなり
+# タイムアウトの原因になっていた。短TTLでプロセス内キャッシュして呼び出しを1回に潰す。
+_SPEND_LOGS_CACHE = {"logs": None, "ts": 0.0}
+_SPEND_LOGS_TTL_SEC = 60
+
+
+def _fetch_all_spend_logs():
+    now = time.time()
+    if _SPEND_LOGS_CACHE["logs"] is not None and (now - _SPEND_LOGS_CACHE["ts"]) < _SPEND_LOGS_TTL_SEC:
+        return _SPEND_LOGS_CACHE["logs"]
     url = f"{LITELLM_BASE_URL}/spend/logs?limit=5000"
     headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
     logs = http_get_json(url, headers)
+    _SPEND_LOGS_CACHE["logs"] = logs
+    _SPEND_LOGS_CACHE["ts"] = now
+    return logs
+
+
+def litellm_all_users_grouped():
+    """管理者用: 全ログを end_user 単位(WebUI/APIタグを分離)で集計する。"""
+    logs = _fetch_all_spend_logs()
 
     per_user = {}
     for entry in logs:
@@ -184,9 +200,7 @@ MODEL_TIER_MAP = {
 def litellm_all_users_by_model():
     """管理者用: 全ログをユーザー×モデルティアで集計する
     (グラフモード用。WebUI/APIの区別はここでは畳み込む)。"""
-    url = f"{LITELLM_BASE_URL}/spend/logs?limit=5000"
-    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-    logs = http_get_json(url, headers)
+    logs = _fetch_all_spend_logs()
 
     per_user = {}
     for entry in logs:
@@ -220,9 +234,7 @@ def shift_date_str(date_str, days):
 def litellm_daily_ranking(date_str):
     """管理者用: 指定日(JST暦日)のトークン使用量をユーザー単位(WebUI+API合算)で集計する。"""
     start_utc, end_utc = jst_day_utc_range(date_str)
-    url = f"{LITELLM_BASE_URL}/spend/logs?limit=5000"
-    headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
-    logs = http_get_json(url, headers)
+    logs = _fetch_all_spend_logs()
 
     per_user = {}
     for entry in logs:
