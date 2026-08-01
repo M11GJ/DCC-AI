@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:main
+FROM ghcr.io/open-webui/open-webui:v0.11.0
 COPY branding/out/favicon.png                  /app/backend/open_webui/static/favicon.png
 COPY branding/out/favicon.svg                  /app/backend/open_webui/static/favicon.svg
 COPY branding/out/favicon.ico                  /app/backend/open_webui/static/favicon.ico

@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:main
+FROM ghcr.io/open-webui/open-webui:v0.11.0
 COPY out/ /tmp/brand/
 RUN set -e; \
     for d in /app/backend/open_webui/static /app/build /app/build/static; do \

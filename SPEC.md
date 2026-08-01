@@ -29,7 +29,7 @@ DCC(デジタルクリエイターズコミュニティ)部員専用AIチャッ�
 ### 2.2 n200のコンテナ構成
 
 ```
-open-webui        (:3000→8080)  チャットUI本体、custom build
+open-webui        (:3000→8080)  チャットUI本体(v0.11.0)、custom build
 litellm           (:4000, 127.0.0.1限定) モデルルーティング・spend記録
 dccai-postgres    (:5432, 内部のみ)      litellmのspend/token永続化
 dccai-cloudflared (network_mode: host)   Cloudflare Tunnel、--protocol http2
@@ -135,6 +135,7 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 - バックアップ: `/opt/dccai/scripts/backup.sh` + systemd timer(毎日03:00・7世代)。詳細は`/opt/dccai/BACKUP.md`
 - `open-webui.env`の変更は`docker compose restart`では反映されず`up -d`(再作成)が必要
+- Open WebUIのベースイメージは`Dockerfile`と`branding/Dockerfile`で`v0.11.0`に固定。更新時は両方のタグを揃え、`docker compose build --pull open-webui && docker compose up -d open-webui`でカスタムブランドイメージを再ビルドする
 - litellmの`config.yaml`はボリュームマウント(`:ro`)のため、内容変更後は`docker compose restart litellm`で明示的に再起動する必要がある(`up -d`だけでは変更なしと判定され再作成されないことがある)
 - cloudflaredの断続的502問題(旧ホスト時代に発生)は新規トンネル作成で解消。現在は`--protocol http2`固定+watchdog(`dccai-cloudflared-watchdog.timer`、2分毎)で保険をかけている
 
