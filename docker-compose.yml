@@ -117,6 +117,29 @@ services:
     mem_limit: 512m
     restart: unless-stopped
 
+  responses-gateway:
+    image: python:3.11-slim
+    container_name: dccai-responses
+    depends_on:
+      - litellm
+    volumes:
+      - ./scripts/responses_gateway.py:/app/responses_gateway.py:ro
+      - open-webui:/webui-data
+    command: sh -c "pip install --quiet --no-cache-dir httpx && python3 /app/responses_gateway.py"
+    environment:
+      - PORT=3003
+      - LITELLM_BASE_URL=http://litellm:4000
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - WEBUI_DB_PATH=/webui-data/webui.db
+      - TOKEN_USAGE_FILE=/webui-data/dcc_ai_token_usage.json
+      # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を維持すること
+      - MONTHLY_TOKEN_LIMIT=10000000
+      - CODE_MAX_CONCURRENCY=1
+    ports:
+      - "3003:3003"
+    mem_limit: 256m
+    restart: unless-stopped
+
 volumes:
   open-webui: {}
   searxng-cache: {}
