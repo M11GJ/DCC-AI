@@ -191,13 +191,25 @@ def _rank_rows_html(items, me_uid):
     ) or '<p class="muted">まだ利用がありません</p>'
 
 
+def _jst_month_utc_range():
+    """今月(JST暦月)の開始・終了をUTCのdatetimeで返す。管理者ページの日別ランキングは
+    JST暦日で切っているため、月次側もJSTで揃えないと月初・月末付近で日別と月間の
+    集計対象がズレる(JST深夜〜朝の利用が別の暦月に計上されてしまう)。"""
+    now_jst = datetime.now(JST)
+    start_jst = datetime(now_jst.year, now_jst.month, 1, tzinfo=JST)
+    end_jst = (
+        datetime(now_jst.year + 1, 1, 1, tzinfo=JST)
+        if now_jst.month == 12
+        else datetime(now_jst.year, now_jst.month + 1, 1, tzinfo=JST)
+    )
+    return start_jst.astimezone(timezone.utc), end_jst.astimezone(timezone.utc)
+
+
 def api_tokens_this_month(user_id: str) -> int:
-    """今月のAPI経由トークン使用量。dccai_pipe.py の月間上限カウンタ(_month_tokens_used)
-    と同じ基準(date.today()、コンテナはUTC運用なのでUTC暦月)で集計するので、
-    ここでの表示と実際にブロックされるタイミングが一致する。"""
-    now_utc = datetime.now(timezone.utc)
-    start = datetime(now_utc.year, now_utc.month, 1)
-    end = datetime(now_utc.year + 1, 1, 1) if now_utc.month == 12 else datetime(now_utc.year, now_utc.month + 1, 1)
+    """今月(JST暦月)のAPI経由トークン使用量。dccai_pipe.py の月間上限カウンタは
+    コンテナのUTC日付で暦月を切っているため、JST朝9時までの数時間は表示(JST基準)と
+    実際の上限判定(UTC基準)の対象月が1日分ズレうる点に注意(月初・月末のみの誤差)。"""
+    start, end = _jst_month_utc_range()
     try:
         rows = _pg_query(
             'SELECT COALESCE(sum(total_tokens), 0) AS total FROM "LiteLLM_SpendLogs" '
@@ -210,11 +222,9 @@ def api_tokens_this_month(user_id: str) -> int:
 
 
 def api_tokens_this_month_all_users():
-    """管理者用: 今月のAPI経由トークン使用量をユーザー単位で集計する
+    """管理者用: 今月(JST暦月)のAPI経由トークン使用量をユーザー単位で集計する
     (月間上限チェック・api_tokens_this_month と同じ基準)。"""
-    now_utc = datetime.now(timezone.utc)
-    start = datetime(now_utc.year, now_utc.month, 1)
-    end = datetime(now_utc.year + 1, 1, 1) if now_utc.month == 12 else datetime(now_utc.year, now_utc.month + 1, 1)
+    start, end = _jst_month_utc_range()
     try:
         rows = _pg_query(
             'SELECT end_user, sum(total_tokens) AS total FROM "LiteLLM_SpendLogs" '
@@ -227,16 +237,17 @@ def api_tokens_this_month_all_users():
     per_user = {}
     for row in rows:
         eu = row.get("end_user") or ""
+        if not eu:
+            continue
         base = eu[: -len(":api")] if eu.endswith(":api") else eu
         per_user[base] = int(row.get("total") or 0)
     return per_user
 
 
 def total_tokens_this_month_all_users():
-    """月間消費ランキング用: 今月のトークン使用量(WebUI+API合算)をユーザー単位で集計する。"""
-    now_utc = datetime.now(timezone.utc)
-    start = datetime(now_utc.year, now_utc.month, 1)
-    end = datetime(now_utc.year + 1, 1, 1) if now_utc.month == 12 else datetime(now_utc.year, now_utc.month + 1, 1)
+    """月間消費ランキング用: 今月(JST暦月)のトークン使用量(WebUI+API合算)を
+    ユーザー単位で集計する。"""
+    start, end = _jst_month_utc_range()
     try:
         rows = _pg_query(
             'SELECT end_user, sum(total_tokens) AS total FROM "LiteLLM_SpendLogs" '
@@ -247,7 +258,9 @@ def total_tokens_this_month_all_users():
         return {}
     per_user = {}
     for row in rows:
-        eu = row.get("end_user") or "(unknown)"
+        eu = row.get("end_user") or ""
+        if not eu:
+            continue
         base = eu[: -len(":api")] if eu.endswith(":api") else eu
         per_user[base] = per_user.get(base, 0) + int(row.get("total") or 0)
     return per_user
@@ -279,7 +292,9 @@ def litellm_all_users_grouped():
 
     per_user = {}
     for entry in logs:
-        end_user = entry.get("end_user") or "(unknown)"
+        end_user = entry.get("end_user")
+        if not end_user:
+            continue
         tokens = entry.get("total_tokens", 0) or 0
         if end_user.endswith(":api"):
             base_id, bucket = end_user[: -len(":api")], "api"
@@ -310,7 +325,9 @@ def litellm_all_users_by_model():
 
     per_user = {}
     for entry in logs:
-        end_user = entry.get("end_user") or "(unknown)"
+        end_user = entry.get("end_user")
+        if not end_user:
+            continue
         base_id = end_user[: -len(":api")] if end_user.endswith(":api") else end_user
         tokens = entry.get("total_tokens", 0) or 0
         model_group = entry.get("model_group") or entry.get("model") or "unknown"
@@ -352,7 +369,9 @@ def litellm_daily_ranking(date_str):
             t = t.replace(tzinfo=timezone.utc)
         if not (start_utc <= t < end_utc):
             continue
-        end_user = entry.get("end_user") or "(unknown)"
+        end_user = entry.get("end_user")
+        if not end_user:
+            continue
         base_id = end_user[: -len(":api")] if end_user.endswith(":api") else end_user
         tokens = entry.get("total_tokens", 0) or 0
         per_user[base_id] = per_user.get(base_id, 0) + tokens
