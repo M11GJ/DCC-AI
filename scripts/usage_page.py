@@ -38,6 +38,9 @@ LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://litellm:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 WEBUI_DB_PATH = os.environ.get("WEBUI_DB_PATH", "/webui-data/webui.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+# dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を手動で同期させること
+# (Open WebUIの管理画面でValvesを変更した場合はこちらの環境変数も合わせて変更が必要)。
+MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "10000000"))
 SESSION_TTL = 6 * 3600
 
 
@@ -158,6 +161,96 @@ def litellm_total_and_by_model(litellm_user_id: str):
         model = row.get("model_group") or row.get("model") or "unknown"
         by_model[model] = by_model.get(model, 0) + tokens
     return total, by_model
+
+
+def _limit_bar_style(used: int, limit: int):
+    """使用率(%)・残り(%)・バー色を計算する(70%以上で黄、95%以上で赤)。limit<=0なら無制限扱い。"""
+    if limit <= 0:
+        return 0, 100, "var(--bar-fill)"
+    pct = min(100.0, round(used / limit * 100, 1))
+    remaining_pct = max(0.0, round(100 - used / limit * 100, 1))
+    if pct >= 95:
+        color = "#d64545"
+    elif pct >= 70:
+        color = "#e0a020"
+    else:
+        color = "var(--bar-fill)"
+    return pct, remaining_pct, color
+
+
+def _rank_rows_html(items, me_uid):
+    """items: [(label, total, uid), ...] を降順ソート済みで渡す。ランキング系ページで共用する。"""
+    max_total = max((t for _, t, _ in items), default=1)
+    return "".join(
+        f'<div class="rank-row{" me" if uid == me_uid else ""}"><div class="rank-num">{i}</div>'
+        f'<div class="rank-name" title="{label}">{label}</div>'
+        f'<div class="rank-track"><div class="rank-fill" '
+        f'style="width:{round(total / max_total * 100, 1)}%;"></div></div>'
+        f'<div class="rank-total">{total:,}</div></div>'
+        for i, (label, total, uid) in enumerate(items, start=1)
+    ) or '<p class="muted">まだ利用がありません</p>'
+
+
+def api_tokens_this_month(user_id: str) -> int:
+    """今月のAPI経由トークン使用量。dccai_pipe.py の月間上限カウンタ(_month_tokens_used)
+    と同じ基準(date.today()、コンテナはUTC運用なのでUTC暦月)で集計するので、
+    ここでの表示と実際にブロックされるタイミングが一致する。"""
+    now_utc = datetime.now(timezone.utc)
+    start = datetime(now_utc.year, now_utc.month, 1)
+    end = datetime(now_utc.year + 1, 1, 1) if now_utc.month == 12 else datetime(now_utc.year, now_utc.month + 1, 1)
+    try:
+        rows = _pg_query(
+            'SELECT COALESCE(sum(total_tokens), 0) AS total FROM "LiteLLM_SpendLogs" '
+            'WHERE end_user = %s AND "startTime" >= %s AND "startTime" < %s',
+            (f"{user_id}:api", start, end),
+        )
+        return int(rows[0]["total"]) if rows else 0
+    except Exception:
+        return 0
+
+
+def api_tokens_this_month_all_users():
+    """管理者用: 今月のAPI経由トークン使用量をユーザー単位で集計する
+    (月間上限チェック・api_tokens_this_month と同じ基準)。"""
+    now_utc = datetime.now(timezone.utc)
+    start = datetime(now_utc.year, now_utc.month, 1)
+    end = datetime(now_utc.year + 1, 1, 1) if now_utc.month == 12 else datetime(now_utc.year, now_utc.month + 1, 1)
+    try:
+        rows = _pg_query(
+            'SELECT end_user, sum(total_tokens) AS total FROM "LiteLLM_SpendLogs" '
+            "WHERE end_user LIKE '%%:api' AND \"startTime\" >= %s AND \"startTime\" < %s "
+            "GROUP BY end_user",
+            (start, end),
+        )
+    except Exception:
+        return {}
+    per_user = {}
+    for row in rows:
+        eu = row.get("end_user") or ""
+        base = eu[: -len(":api")] if eu.endswith(":api") else eu
+        per_user[base] = int(row.get("total") or 0)
+    return per_user
+
+
+def total_tokens_this_month_all_users():
+    """月間消費ランキング用: 今月のトークン使用量(WebUI+API合算)をユーザー単位で集計する。"""
+    now_utc = datetime.now(timezone.utc)
+    start = datetime(now_utc.year, now_utc.month, 1)
+    end = datetime(now_utc.year + 1, 1, 1) if now_utc.month == 12 else datetime(now_utc.year, now_utc.month + 1, 1)
+    try:
+        rows = _pg_query(
+            'SELECT end_user, sum(total_tokens) AS total FROM "LiteLLM_SpendLogs" '
+            'WHERE "startTime" >= %s AND "startTime" < %s GROUP BY end_user',
+            (start, end),
+        )
+    except Exception:
+        return {}
+    per_user = {}
+    for row in rows:
+        eu = row.get("end_user") or "(unknown)"
+        base = eu[: -len(":api")] if eu.endswith(":api") else eu
+        per_user[base] = per_user.get(base, 0) + int(row.get("total") or 0)
+    return per_user
 
 
 # litellmの/spend/logsはlimit/end_user_idフィルタが効かず、messages/response列込みで
@@ -355,6 +448,8 @@ PAGE_TEMPLATE = """<!doctype html>
   code {{ background: rgba(127,127,127,0.15); padding: 1px 6px; border-radius: 4px; font-size: 0.85em; }}
   pre {{ margin: 10px 0 0; padding: 10px 12px; background: rgba(127,127,127,0.12);
          border-radius: 8px; font-size: 0.78rem; overflow-x: auto; white-space: pre; }}
+  .limit-track {{ background: var(--gridline); border-radius: 4px; height: 20px; overflow: hidden; margin: 10px 0 8px; }}
+  .limit-fill {{ height: 100%; border-radius: 4px 0 0 4px; transition: width .3s; }}
 </style>
 <div class="viz-root">
   <div class="top-bar">
@@ -371,6 +466,12 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="card">
     <div class="row"><span>WebUI(チャット画面)利用</span><span>{webui:,}</span></div>
     <div class="row"><span>API利用</span><span>{api:,}</span></div>
+  </div>
+  <div class="card">
+    <div class="muted">今月のAPI利用状況(月間上限: {monthly_limit:,} トークン)</div>
+    <div class="limit-track"><div class="limit-fill" style="width:{limit_pct}%; background:{limit_color};"></div></div>
+    <div class="row" style="border-bottom:none;"><span>{api_month:,} トークン使用</span><span>残り {limit_remaining_pct}%</span></div>
+    <p class="muted" style="margin:6px 0 0;">この上限は<strong>API経由の利用のみ</strong>が対象です。WebUI(チャット画面)の利用は含まれません。</p>
   </div>
   <div class="card">
     <div class="muted" style="margin-bottom:8px">モデル別内訳(WebUI+API合算)</div>
@@ -439,6 +540,14 @@ ADMIN_TEMPLATE = """<!doctype html>
   .bar-total {{ width: 72px; flex: none; text-align: right; font-size: 0.82rem;
                 color: var(--text-secondary); font-variant-numeric: tabular-nums; }}
 
+  .limit-row {{ display: flex; align-items: center; gap: 10px; margin: 10px 0; }}
+  .limit-name {{ width: 110px; flex: none; font-size: 0.82rem; color: var(--text-secondary);
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .limit-track {{ flex: 1; background: var(--gridline); border-radius: 4px; height: 22px; overflow: hidden; }}
+  .limit-fill {{ height: 100%; border-radius: 0 4px 4px 0; }}
+  .limit-pct {{ width: 96px; flex: none; text-align: right; font-size: 0.82rem;
+                color: var(--text-secondary); font-variant-numeric: tabular-nums; }}
+
   table {{ width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.88rem; }}
   th, td {{ text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--gridline);
             font-variant-numeric: tabular-nums; }}
@@ -462,6 +571,11 @@ ADMIN_TEMPLATE = """<!doctype html>
       <a href="/admin?date={next_date}">翌日 &rarr;</a>
     </div>
     {rank_rows}
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px;">今月のAPI利用状況(月間上限: {monthly_limit:,} トークン/人。WebUIチャットは対象外)</div>
+    {monthly_api_rows}
   </div>
 
   <div class="card">
@@ -515,12 +629,20 @@ RANKING_TEMPLATE = """<!doctype html>
 </style>
 <div class="viz-root">
   <div class="top-bar">
-    <h1>🏆 トークン総消費量ランキング</h1>
+    <h1>🏆 トークン消費ランキング</h1>
     <div class="top-bar-actions">
       <a class="pill-btn" href="/">&larr; 自分のページ</a>
       <button class="pill-btn" id="theme-toggle" type="button">🌓 表示切替</button>
     </div>
   </div>
+
+  <h2 style="font-size:1rem; margin:24px 0 0;">今月の消費ランキング</h2>
+  <p class="muted">今月分、WebUI+API合算です。</p>
+  <div class="card">
+    {monthly_rank_rows}
+  </div>
+
+  <h2 style="font-size:1rem; margin:24px 0 0;">全体の合計ランキング</h2>
   <p class="muted">全期間累計、WebUI+API合算です。</p>
   <div class="card">
     {rank_rows}
@@ -649,16 +771,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ),
                 key=lambda r: -r[1],
             )
-            max_total = max((t for _, t, _ in ranking_data), default=1)
-            rank_rows = "".join(
-                f'<div class="rank-row{" me" if uid == user_id else ""}"><div class="rank-num">{i}</div>'
-                f'<div class="rank-name" title="{label}">{label}</div>'
-                f'<div class="rank-track"><div class="rank-fill" '
-                f'style="width:{round(total / max_total * 100, 1)}%;"></div></div>'
-                f'<div class="rank-total">{total:,}</div></div>'
-                for i, (label, total, uid) in enumerate(ranking_data, start=1)
-            ) or '<p class="muted">まだ利用がありません</p>'
-            self._send(200, RANKING_TEMPLATE.format(rank_rows=rank_rows))
+            rank_rows = _rank_rows_html(ranking_data, user_id)
+
+            monthly_totals = total_tokens_this_month_all_users()
+            monthly_ranking_data = sorted(
+                ((label_for(uid), total, uid) for uid, total in monthly_totals.items() if total > 0),
+                key=lambda r: -r[1],
+            )
+            monthly_rank_rows = _rank_rows_html(monthly_ranking_data, user_id)
+
+            self._send(200, RANKING_TEMPLATE.format(rank_rows=rank_rows, monthly_rank_rows=monthly_rank_rows))
             return
 
         if path == "/admin":
@@ -692,6 +814,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             date_label = date_str
             prev_date = shift_date_str(date_str, -1)
             next_date = shift_date_str(date_str, 1)
+
+            # ---- 今月のAPI利用状況(月間上限に対する消費率、ユーザー単位) ----
+            monthly_api = api_tokens_this_month_all_users()
+            monthly_api_data = sorted(
+                ((label_for(uid), used) for uid, used in monthly_api.items() if used > 0),
+                key=lambda r: -r[1],
+            )
+
+            def _limit_row(label, used):
+                pct, _remaining_pct, color = _limit_bar_style(used, MONTHLY_TOKEN_LIMIT)
+                return (
+                    f'<div class="limit-row"><div class="limit-name" title="{label}">{label}</div>'
+                    f'<div class="limit-track"><div class="limit-fill" style="width:{pct}%; background:{color};"></div></div>'
+                    f'<div class="limit-pct">{used:,} ({pct}%)</div></div>'
+                )
+
+            monthly_api_rows = "".join(
+                _limit_row(label, used) for label, used in monthly_api_data
+            ) or '<p class="muted">今月のAPI利用はまだありません</p>'
 
             # ---- モデル別(全期間累計テーブル) ----
             by_model_per_user = litellm_all_users_by_model()
@@ -749,6 +890,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 prev_date=prev_date,
                 next_date=next_date,
                 rank_rows=rank_rows,
+                monthly_limit=MONTHLY_TOKEN_LIMIT,
+                monthly_api_rows=monthly_api_rows,
                 model_bar_rows=model_bar_rows,
                 model_table_rows=model_table_rows,
                 webui_api_rows=webui_api_rows,
@@ -771,6 +914,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '<p class="muted"><a href="/admin">管理者用: 全ユーザーの使用量一覧</a></p>'
             if role == "admin" else ""
         )
+        api_month = api_tokens_this_month(user_id)
+        limit_pct, limit_remaining_pct, limit_color = _limit_bar_style(api_month, MONTHLY_TOKEN_LIMIT)
         body = PAGE_TEMPLATE.format(
             name=name or "you",
             total=webui_total + api_total,
@@ -778,6 +923,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             api=api_total,
             model_rows=model_rows,
             admin_link=admin_link,
+            monthly_limit=MONTHLY_TOKEN_LIMIT,
+            api_month=api_month,
+            limit_pct=limit_pct,
+            limit_remaining_pct=limit_remaining_pct,
+            limit_color=limit_color,
         )
         self._send(200, body)
 
