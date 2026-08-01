@@ -80,11 +80,11 @@ class Pipe:
         )
         MONTHLY_TOKEN_LIMIT: int = Field(
             default=10_000_000,
-            description="ユーザー1人あたりの月間トークン上限（High/Low/Code合算、WebUI/API合算、0で無制限）",
+            description="ユーザー1人あたりの月間トークン上限（High/Low/Code合算、API経由のみ対象。WebUI経由のチャットは対象外。0で無制限）",
         )
         TOKEN_USAGE_FILE: str = Field(
             default="/app/backend/data/dcc_ai_token_usage.json",
-            description="月間トークン使用量の保存先（データボリューム内）",
+            description="月間トークン使用量(API経由分のみ)の保存先（データボリューム内）",
         )
         SYSTEM_PROMPT: str = Field(
             default=(
@@ -261,11 +261,12 @@ class Pipe:
         is_api_call = not (__metadata__ or {}).get("chat_id")
         litellm_user_id = f"{user_id}:api" if is_api_call else user_id
 
-        # ---- 月間トークン上限チェック（High/Low/Code・WebUI/API合算、モデル選択より前に判定） ----
-        if self.valves.MONTHLY_TOKEN_LIMIT > 0:
+        # ---- 月間トークン上限チェック（API経由のみ対象、High/Low/Code合算、モデル選択より前に判定） ----
+        # WebUI経由のチャットはこの上限の対象外(部員の通常利用を妨げないため)。
+        if is_api_call and self.valves.MONTHLY_TOKEN_LIMIT > 0:
             if self._month_tokens_used(user_id) >= self.valves.MONTHLY_TOKEN_LIMIT:
                 return (
-                    f"今月の DCC AI 利用上限（{self.valves.MONTHLY_TOKEN_LIMIT:,} トークン）に達しました。"
+                    f"今月の DCC AI API利用上限（{self.valves.MONTHLY_TOKEN_LIMIT:,} トークン）に達しました。"
                     "来月また使えます。"
                 )
 
@@ -508,7 +509,7 @@ class Pipe:
                                     waited += 3.0
                                     continue
                     finally:
-                        if captured_tokens:
+                        if is_api_call and captured_tokens:
                             self._add_tokens(user_id, captured_tokens)
                         state["active"] -= 1
                         sem.release()
@@ -533,7 +534,7 @@ class Pipe:
                             return f"Error {r.status_code}: {r.text}"
                         resp_json = r.json()
                         usage = resp_json.get("usage") or {}
-                        if usage.get("total_tokens"):
+                        if is_api_call and usage.get("total_tokens"):
                             self._add_tokens(user_id, usage["total_tokens"])
                         count_high()
                         await status("✅ 生成しました。", True)
