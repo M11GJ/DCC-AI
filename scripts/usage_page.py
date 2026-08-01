@@ -499,7 +499,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <p class="muted">WebUI分・API分はそれぞれ独立に集計しています(2026-07-23以降のリクエストが対象。それ以前はWebUI/APIの区別なく合計にのみ反映されます)。</p>
 
   <div class="card">
-    <div class="muted" style="margin-bottom:8px">🔌 API接続情報</div>
+    <div class="muted" style="margin-bottom:8px">🔌 API接続情報(Chat Completions)</div>
     <div>Endpoint: <code>https://ai.shu-dcc.net/api/chat/completions</code></div>
     <div style="margin-top:4px;">モデルID: <code>dccai.dccai-high-vision</code> (High) /
       <code>dccai.dccai-low-vision</code> (Low) /
@@ -511,6 +511,21 @@ PAGE_TEMPLATE = """<!doctype html>
     <p class="muted" style="margin-top:8px;">
       OpenAI公式SDKの場合は base_url に <code>https://ai.shu-dcc.net/api</code> を指定してください。
       APIキーは DCC AI の Settings &gt; Account &gt; API keys から発行できます。
+    </p>
+  </div>
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px">🔌 API接続情報(Responses API)</div>
+    <div>Endpoint: <code>https://responses.shu-dcc.net/v1/responses</code></div>
+    <div style="margin-top:4px;">モデルID: <code>dccai.dccai-high-vision</code> (High) /
+      <code>dccai.dccai-low-vision</code> (Low) /
+      <code>dccai.dccai-code</code> (Code)</div>
+    <pre>curl https://responses.shu-dcc.net/v1/responses \\
+  -H "Authorization: Bearer sk-xxxxxxxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"model": "dccai.dccai-low-vision", "input": "hello"}}'</pre>
+    <p class="muted" style="margin-top:8px;">
+      OpenAI公式SDKの場合は base_url に <code>https://responses.shu-dcc.net</code> を指定してください(<code>client.responses.create(...)</code>)。
+      APIキーはChat Completions用と共通です。<strong>月間トークン上限もChat Completions APIと合算</strong>されます。
     </p>
   </div>
   {admin_link}
