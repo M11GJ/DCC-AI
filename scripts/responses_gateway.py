@@ -12,11 +12,14 @@ Pipeモデルには使えない)、同等のポリシー(認証・モデルル�
 として消費する(WebUIチャットは引き続き対象外)。
 """
 import fcntl
+import html
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import date
 from http import server as http_server
 from urllib.parse import urlparse
@@ -114,6 +117,272 @@ def resolve_model(raw_model: str):
     return "dccai-low", False
 
 
+def normalize_request_tools(payload: dict) -> None:
+    """Responses APIとChat Completionsの両方のfunction tool表現を受け付ける。
+
+    LiteLLM 1.93.0はResponses API上でChat Completions形式の
+    {"type":"function","function":{...}}を受けると、ネスト内のnameを読まず
+    空の関数名へ変換する。Codex系クライアントもこの形式を送ることがあるため、
+    LiteLLMへ渡す前にResponses API標準のトップレベル形式へ揃える。
+    """
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        normalized = []
+        for tool in tools:
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                normalized.append(tool)
+                continue
+            nested = tool.get("function")
+            if not isinstance(nested, dict):
+                normalized.append(tool)
+                continue
+            flat = {k: v for k, v in tool.items() if k != "function"}
+            for key in ("name", "description", "parameters", "strict"):
+                if key not in flat and key in nested:
+                    flat[key] = nested[key]
+            normalized.append(flat)
+        payload["tools"] = normalized
+
+    choice = payload.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") == "function":
+        nested = choice.get("function")
+        if isinstance(nested, dict) and not choice.get("name") and nested.get("name"):
+            payload["tool_choice"] = {"type": "function", "name": nested["name"]}
+
+
+_DSML = r"[|｜]DSML[|｜]"
+_DSML_BLOCK_RE = re.compile(
+    rf"<{_DSML}tool_calls>(.*?)</{_DSML}tool_calls>", re.DOTALL
+)
+_DSML_INVOKE_RE = re.compile(
+    rf"<{_DSML}invoke\s+name=\"([^\"]+)\"\s*>(.*?)</{_DSML}invoke>", re.DOTALL
+)
+_DSML_PARAM_RE = re.compile(
+    rf"<{_DSML}parameter\s+name=\"([^\"]+)\"\s+string=\"(true|false)\"\s*>(.*?)</{_DSML}parameter>",
+    re.DOTALL,
+)
+
+
+def extract_dsml_tool_calls(text: str):
+    """DeepSeek V4のDSML文字列を(name, arguments)へ戻す。
+
+    公式encoding_dsv4.pyの形式に合わせ、半角/全角の縦棒表記をどちらも許容する。
+    DSMLが無い場合は元テキストと空リストを返し、壊れたDSMLはValueErrorにする。
+    """
+    blocks = list(_DSML_BLOCK_RE.finditer(text))
+    if not blocks:
+        return text, []
+
+    calls = []
+    for block in blocks:
+        body = block.group(1)
+        invokes = list(_DSML_INVOKE_RE.finditer(body))
+        if not invokes:
+            raise ValueError("DSML tool_calls block has no invoke")
+        for invoke in invokes:
+            name = html.unescape(invoke.group(1))
+            params = {}
+            for match in _DSML_PARAM_RE.finditer(invoke.group(2)):
+                key = html.unescape(match.group(1))
+                if key in params:
+                    raise ValueError(f"duplicate DSML parameter: {key}")
+                raw_value = html.unescape(match.group(3))
+                if match.group(2) == "true":
+                    value = raw_value
+                else:
+                    value = json.loads(raw_value)
+                params[key] = value
+            calls.append({"name": name, "arguments": params})
+
+    cleaned = _DSML_BLOCK_RE.sub("", text).strip()
+    return cleaned, calls
+
+
+def normalize_dsml_response(response: dict, request_payload: dict) -> bool:
+    """漏れたDSMLを標準Responses APIのoutput itemへ変換する。"""
+    output = response.get("output")
+    if not isinstance(output, list):
+        return False
+
+    tool_types = {}
+    for tool in request_payload.get("tools") or []:
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+            tool_types[tool["name"]] = tool.get("type", "function")
+
+    converted = False
+    rebuilt = []
+    for item in output:
+        rebuilt.append(item)
+        if not isinstance(item, dict):
+            continue
+        pending_calls = []
+        for part in item.get("content") or []:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            text = part.get("text")
+            if not isinstance(text, str) or "DSML" not in text:
+                continue
+            try:
+                cleaned, calls = extract_dsml_tool_calls(text)
+            except (ValueError, json.JSONDecodeError) as exc:
+                print(f"responses_gateway: malformed DSML left as text: {exc}", flush=True)
+                continue
+            if not calls:
+                continue
+            unknown_names = [call["name"] for call in calls if call["name"] not in tool_types]
+            if unknown_names:
+                print(
+                    f"responses_gateway: DSML names not present in request tools: {unknown_names}",
+                    flush=True,
+                )
+                continue
+            part["text"] = cleaned
+            pending_calls.extend(calls)
+            converted = True
+
+        for call in pending_calls:
+            call_id = f"call_dsml_{uuid.uuid4().hex}"
+            name = call["name"]
+            arguments = call["arguments"]
+            if tool_types.get(name) == "custom":
+                if set(arguments) == {"content"} and isinstance(arguments["content"], str):
+                    custom_input = arguments["content"]
+                else:
+                    custom_input = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                rebuilt.append(
+                    {
+                        "type": "custom_tool_call",
+                        "id": call_id,
+                        "call_id": call_id,
+                        "name": name,
+                        "input": custom_input,
+                        "status": "completed",
+                    }
+                )
+            else:
+                rebuilt.append(
+                    {
+                        "type": "function_call",
+                        "id": call_id,
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": json.dumps(
+                            arguments, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        "status": "completed",
+                    }
+                )
+    response["output"] = rebuilt
+    return converted
+
+
+def response_sse_events(response: dict):
+    """非stream応答から、クライアントが処理できる標準Responses SSEを生成する。"""
+    sequence = 0
+
+    def event(event_type, **fields):
+        nonlocal sequence
+        value = {"type": event_type, "sequence_number": sequence, **fields}
+        sequence += 1
+        return value
+
+    shell = dict(response)
+    shell["status"] = "in_progress"
+    shell["output"] = []
+    yield event("response.created", response=shell)
+    yield event("response.in_progress", response=shell)
+
+    for output_index, original in enumerate(response.get("output") or []):
+        if not isinstance(original, dict):
+            continue
+        item = dict(original)
+        item_type = item.get("type")
+        if item_type == "function_call":
+            arguments = item.get("arguments") or ""
+            added = {**item, "arguments": "", "status": "in_progress"}
+            yield event("response.output_item.added", output_index=output_index, item=added)
+            if arguments:
+                yield event(
+                    "response.function_call_arguments.delta",
+                    output_index=output_index,
+                    item_id=item.get("id"),
+                    delta=arguments,
+                )
+            yield event(
+                "response.function_call_arguments.done",
+                output_index=output_index,
+                item_id=item.get("id"),
+                name=item.get("name"),
+                arguments=arguments,
+            )
+            yield event("response.output_item.done", output_index=output_index, item=item)
+        elif item_type == "custom_tool_call":
+            custom_input = item.get("input") or ""
+            added = {**item, "input": "", "status": "in_progress"}
+            yield event("response.output_item.added", output_index=output_index, item=added)
+            if custom_input:
+                yield event(
+                    "response.custom_tool_call_input.delta",
+                    output_index=output_index,
+                    item_id=item.get("id"),
+                    delta=custom_input,
+                )
+            yield event(
+                "response.custom_tool_call_input.done",
+                output_index=output_index,
+                item_id=item.get("id"),
+                input=custom_input,
+            )
+            yield event("response.output_item.done", output_index=output_index, item=item)
+        elif item_type == "message":
+            added = {**item, "content": [], "status": "in_progress"}
+            yield event("response.output_item.added", output_index=output_index, item=added)
+            for content_index, part in enumerate(item.get("content") or []):
+                if not isinstance(part, dict) or part.get("type") != "output_text":
+                    continue
+                text = part.get("text") or ""
+                empty_part = {**part, "text": ""}
+                yield event(
+                    "response.content_part.added",
+                    output_index=output_index,
+                    content_index=content_index,
+                    item_id=item.get("id"),
+                    part=empty_part,
+                )
+                if text:
+                    yield event(
+                        "response.output_text.delta",
+                        output_index=output_index,
+                        content_index=content_index,
+                        item_id=item.get("id"),
+                        delta=text,
+                    )
+                yield event(
+                    "response.output_text.done",
+                    output_index=output_index,
+                    content_index=content_index,
+                    item_id=item.get("id"),
+                    text=text,
+                )
+                yield event(
+                    "response.content_part.done",
+                    output_index=output_index,
+                    content_index=content_index,
+                    item_id=item.get("id"),
+                    part=part,
+                )
+            yield event("response.output_item.done", output_index=output_index, item=item)
+        else:
+            yield event(
+                "response.output_item.added",
+                output_index=output_index,
+                item={**item, "status": "in_progress"},
+            )
+            yield event("response.output_item.done", output_index=output_index, item=item)
+
+    yield event("response.completed", response=response)
+
+
 class Handler(http_server.BaseHTTPRequestHandler):
     def _send_json(self, status, obj):
         body = json.dumps(obj).encode()
@@ -149,6 +418,8 @@ class Handler(http_server.BaseHTTPRequestHandler):
         except Exception:
             self._send_json(400, {"error": {"message": "invalid JSON body"}})
             return
+
+        normalize_request_tools(payload)
 
         if MONTHLY_TOKEN_LIMIT > 0 and month_tokens_used(user_id) >= MONTHLY_TOKEN_LIMIT:
             self._send_json(
@@ -186,7 +457,42 @@ class Handler(http_server.BaseHTTPRequestHandler):
             "Content-Type": "application/json",
         }
         try:
-            if stream:
+            # DSMLはストリーム途中では通常のoutput_text deltaと区別できず、転送後に
+            # 取り消せない。ツール付きstreamだけ上流を一旦non-streamで受け、DSMLを
+            # 正規化してから標準SSEを組み立てる。通常テキストstreamは従来どおり中継。
+            if stream and payload.get("tools"):
+                upstream_payload = dict(payload)
+                upstream_payload["stream"] = False
+                with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+                    r = client.post(url, json=upstream_payload, headers=headers)
+                    if r.status_code >= 400:
+                        body = r.content
+                        self.send_response(r.status_code)
+                        self.send_header(
+                            "Content-Type", r.headers.get("content-type", "application/json")
+                        )
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+
+                    resp_json = r.json()
+                    normalize_dsml_response(resp_json, payload)
+                    usage = resp_json.get("usage") or {}
+                    if usage.get("total_tokens"):
+                        add_tokens(user_id, usage["total_tokens"])
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    for event in response_sse_events(resp_json):
+                        event_type = event["type"]
+                        data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+                        self.wfile.write(f"event: {event_type}\ndata: {data}\n\n".encode())
+                        self.wfile.flush()
+                    self.close_connection = True
+            elif stream:
                 with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
                     with client.stream("POST", url, json=payload, headers=headers) as r:
                         self.send_response(r.status_code)
@@ -215,6 +521,11 @@ class Handler(http_server.BaseHTTPRequestHandler):
                     body = r.content
                     try:
                         resp_json = r.json()
+                        if r.status_code < 400:
+                            normalize_dsml_response(resp_json, payload)
+                            body = json.dumps(
+                                resp_json, ensure_ascii=False, separators=(",", ":")
+                            ).encode()
                         usage = resp_json.get("usage") or {}
                         if usage.get("total_tokens"):
                             add_tokens(user_id, usage["total_tokens"])
