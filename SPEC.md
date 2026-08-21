@@ -31,13 +31,13 @@ DCC(デジタルクリエイターズコミュニティ)部員専用AIチャッ�
 ### 2.2 n200のコンテナ構成(2026-08-21確認、8コンテナ全て稼働中・再起動回数0)
 
 ```
-open-webui        (:3000→8080)  チャットUI本体(v0.11.0)、custom build、mem_limit 1536m
+open-webui        (:3000→8080, 127.0.0.1限定) チャットUI本体(v0.11.0)、custom build、mem_limit 1536m
 litellm           (:4000, 127.0.0.1限定) モデルルーティング・spend記録、mem_limit 2048m
 dccai-postgres    (内部:5432のみ)        litellmのspend/token永続化、mem_limit 256m
 dccai-cloudflared (network_mode: host)   Cloudflare Tunnel、--protocol http2、mem_limit 256m
-dccai-dashboard   (:3001)                LiteLLM Prometheusメトリクスの簡易ダッシュボード、mem_limit 128m
-dccai-usage       (:3002)                個人別使用量ページ(Discord OAuth)、mem_limit 256m
-dccai-responses   (:3003)                Responses APIゲートウェイ、mem_limit 256m
+dccai-dashboard   (:3001, 127.0.0.1限定) LiteLLM Prometheusメトリクスの簡易ダッシュボード、mem_limit 128m
+dccai-usage       (:3002, 127.0.0.1限定) 個人別使用量ページ(Discord OAuth)、mem_limit 256m
+dccai-responses   (:3003, 127.0.0.1限定) Responses APIゲートウェイ、mem_limit 256m
 searxng           (内部のみ)             Web検索、mem_limit 512m
 ```
 
@@ -55,23 +55,25 @@ ollamaはn200には無い(GPU非搭載のため)。`docker-compose.yml`内にコ
 | usage.shu-dcc.net | localhost:3002 (dccai-usage) |
 | responses.shu-dcc.net | localhost:3003 (dccai-responses) |
 
-Cloudflare API tokenは無く、Public Hostnameの追加はダッシュボードでの手動作業が必要(AI側から自動化不可)。**cloudflaredのバージョンが古い(2026.7.3稼働中、2026.8.2への更新をログが継続的に警告)**。「context canceled」エラーがログに頻出するが、これはクライアント側切断による正常系のノイズで実害は無い。
+Cloudflare API tokenは無く、Public Hostnameの追加はダッシュボードでの手動作業が必要。Tunnel tokenはGit管理外の`.env`に`CLOUDFLARE_TUNNEL_TOKEN`として保持し、Composeへ環境変数で渡す。アプリの公開ポートは全て127.0.0.1限定で、Cloudflare Tunnelだけが外部入口となる。「context canceled」エラーはクライアント側切断による正常系のノイズで実害は無い。
+
+過去のGit履歴には旧Tunnel tokenが含まれるため、Cloudflare Zero Trust側でのtoken再発行後に`.env`を更新すること。現在の追跡ファイルと追跡対象の`.bak`ファイルからはtokenを除去済み。
 
 ---
 
 ## 3. モデル構成(litellm)
 
-`litellm/config.yaml`で3系統+フォールバックを定義。**外部向けmodel_name(`dccai-high`/`dccai-low`/`dccai-code`)は固定し、中身(実際に呼ぶモデル)だけを差し替える設計**。2026-08-21時点、`config.yaml`の実体を直接確認し以下の通り相違なし:
+`litellm/config.yaml`で3系統を定義。**外部向けmodel_name(`dccai-high`/`dccai-low`/`dccai-code`)は固定し、中身だけを差し替える設計**。
 
 | 系統 | 1st (litellm model_name) | 実体 | フォールバック順 |
 |---|---|---|---|
-| High | `dccai-high` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: max` | `dccai-high-legacy`(Cerebras llama-3.3-70b / DeepSeek-V3 featherless) → `dccai-low` → `dccai-backup-low` |
-| Low | `dccai-low` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: high` | `dccai-backup-low` |
-| Code | `dccai-code` | `deepseek/deepseek-v4-flash`(0731版) / `reasoning_effort: max` | `dccai-high` |
+| High | `dccai-high` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: max` | なし（同一API内リトライのみ） |
+| Low | `dccai-low` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: high` | なし（同一API内リトライのみ） |
+| Code | `dccai-code` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: max` | なし（同一API内リトライのみ） |
 
 DeepSeek V4系は既定でreasoning(思考過程)を出力するため、`max_tokens`が小さいと本文前に打ち切られる。
 
-Vision Experimentalは、現行LiteLLMのDeepSeek専用adapter経由だと未知モデルとしてtext-only扱いされ画像部分が除去されるため、High/Lowのみ`openai/` provider + `api_base: https://api.deepseek.com`で公式OpenAI互換APIへ中継する。`reasoning_effort`は`allowed_openai_params`、`thinking`は`extra_body`で明示的に通す。これによりLiteLLMの認証・使用量記録・fallbackを維持しつつ画像とeffort指定をそのまま送れる。
+Vision Experimentalは、現行LiteLLMのDeepSeek専用adapter経由だと未知モデルとしてtext-only扱いされ画像部分が除去されるため、3系統とも`openai/` provider + `api_base: https://api.deepseek.com`で公式OpenAI互換APIへ中継する。`reasoning_effort`は`allowed_openai_params`、`thinking`は`extra_body`で明示的に通す。契約切れ・モデル廃止済みのCerebras/Featherlessフォールバックは失敗と遅延の原因になるため削除した。
 
 Open WebUI上の公開モデルID(Pipe経由):`dccai.dccai-high-vision` / `dccai.dccai-low-vision` / `dccai.dccai-code`
 
@@ -89,7 +91,9 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定
   - WebUI呼び出しとAPI呼び出しの区別は`__metadata__.chat_id`の有無で判定(`is_api_call`)
   - litellm側の集計用`user`フィールドも`<user_id>:api`(API)/`<user_id>`(WebUI)で分離
-- **画像処理**: High/Lowはどちらもネイティブマルチモーダルモデルのため、画像を`image_url`形式のまま各モデルへ直接渡す。画像を説明文へ変換するGemini/Ollamaの中間処理は使用しない。画像非対応のCodeへ画像が送られた場合のみ`VISION_UPSTREAM`(既定`dccai-high`)へ転送する
+- **時刻基準**: High日次上限・API月間上限はどちらもJST(Asia/Tokyo)の暦日・暦月で判定
+- **画像処理**: High/Low/Codeすべてネイティブマルチモーダルモデルのため、画像を`image_url`形式のまま選択モデルへ直接渡す。別モデルへの画像転送やGemini/Ollamaの中間処理は使用しない
+- **API互換オプション**: `tools`/`tool_choice`/`response_format`/`stop`等の主要Chat Completions指定をLiteLLMへ転送する
 - **ストリーミング**: `stream_options.include_usage`を要求し、SSE末尾のusageチャンクからトークン数を取得(Open WebUI管理者ダッシュボードのトークン表示・月間カウンタ更新の両方に必要)
 
 ### 4.1 Web検索・ナレッジ
@@ -117,7 +121,8 @@ DCC部員はOpen WebUIで発行したAPIキー(Settings > Account > API keys)を
 - 実体は`scripts/responses_gateway.py`(python:3.11-slim + httpx、コンテナ`dccai-responses`)。**2026-08-03に大幅拡張済み**(313行追加、「ツール呼び出し互換層」節参照)。テスト`scripts/test_responses_gateway.py`も同時追加。
 - **背景**: litellm自体は`/v1/responses`に標準対応済みだが、Open WebUI本体の`/responses`ルートは「Connection」モデル専用でPipeモデルには使えない。PipeはChat Completions専用のフックしか持たないため、Responses API対応は別サービスとして実装した
 - 認証: Open WebUIの`api_key`テーブル(`webui.db`)を直接読んでBearerトークンを検証(Open WebUI自身と同じ検証方法)
-- Pipeとの整合性: モデルID解決・Code専用同時実行制限(1)・月間トークン上限判定はPipeと**同じロジック・同じファイル**(`TOKEN_USAGE_FILE`を`open-webui`名前付きボリューム経由で共有、flock方式も同一)を使うため、二重管理にならず正しく合算される
+- Pipeとの整合性: モデルID解決・Code専用同時実行制限(3)・JST月間トークン上限判定はPipeと**同じロジック・同じファイル**(`TOKEN_USAGE_FILE`を`open-webui`名前付きボリューム経由で共有、flock方式も同一)を使うため、二重管理にならず正しく合算される
+- 画像入力は3モデルすべて選択モデルへそのまま渡す。内部reasoning itemは最終回答・tool callを残して公開応答から除外する。stream指定時も安全化後に標準SSEへ組み直す
 - ストリーミング対応(`response.completed`イベントのusageを検出)
 - **ツール呼び出し互換層**: Responses API標準のfunction toolと、Codex系クライアントが送るChat Completions型のネスト形式をどちらも受理してLiteLLM向けに正規化する。DeepSeek V4のDSMLが`output_text`へ漏れた場合は公式DSML形式を解析し、`function_call`/`custom_tool_call`へ変換する
 - ツール付きストリーミングはDSML文字列をクライアントへ先に流さないため、上流の完了応答をバッファしてから標準Responses SSEイベントを再生成する。そのため、ツールを含まない通常ストリームと異なり最初のイベントまで上流生成時間ぶん待つ
@@ -148,9 +153,7 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 ## 8. 運用・バックアップ
 
-- バックアップ: `/opt/dccai/scripts/backup.sh` + systemd timer(毎日03:00・7世代)。**2026-08-21も正常稼働を確認**(`/opt/dccai/backups/20260821_030001`, 457M)。詳細は`/opt/dccai/BACKUP.md`
-  - ログ中に`WARNING: /mnt/c/Users/DCC05 が見つかりません`が毎回出るが、これはWSLホスト時代(desktop-1f999hf)の名残でWindows側コピー先パスが実機n200には存在しないため。実害はない(サーバ内保存は成功している)が、スクリプト内の該当ロジックはn200では恒久的にno-opなので、気になる場合は削除して整理してよい
-  - バックアップは**サーバ内のみ**(単一物理ディスク)。オフサイト退避は未対応のまま
+- バックアップ: `/opt/dccai/scripts/backup.sh` + systemd timer(JST毎日03:00・7世代)。`umask 077`で作成し、既存世代もroot専用権限に統一。`OFFSITE_BACKUP_DIR`に別ディスク/NASのマウントポイントを指定すると同時コピーする。詳細は`/opt/dccai/BACKUP.md`
 - `open-webui.env`の変更は`docker compose restart`では反映されず`up -d`(再作成)が必要
 - Open WebUIのベースイメージは`Dockerfile`と`branding/Dockerfile`で`v0.11.0`に固定(2026-08-01に更新)。更新時は両方のタグを揃え、`docker compose build --pull open-webui && docker compose up -d open-webui`でカスタムブランドイメージを再ビルドする
 - litellmの`config.yaml`はボリュームマウント(`:ro`)のため、内容変更後は`docker compose restart litellm`で明示的に再起動する必要がある(`up -d`だけでは変更なしと判定され再作成されないことがある)
@@ -168,9 +171,9 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 ## 10. アクセス情報
 
-- 対象ホスト: `ssh gunk@100.100.252.10`(パスワードレスsudo、sshd非稼働のためTailscale SSHのみ。**セッションによって追加のブラウザ認証を求められることがある**)
+- 対象ホスト: `ssh gunk@100.100.252.10`(OpenSSH公開鍵認証をTailscaleインターフェース内だけで利用。パスワード認証・rootログインは禁止、UFWはtailscale0の22/tcpのみ許可)
 - アプリ: `/opt/dccai`(git管理。`sudo git -c user.email=... -c user.name=...`で操作するか、先に`git config --global --add safe.directory /opt/dccai`)。GitHub remote `github-dccai:M11GJ/DCC-AI.git`あり(SSH鍵はn200上に設定済み、`git fetch`確認済み)
-- 秘密情報: `/opt/dccai/.env`(git管理外、平文)。DeepSeek/Gemini(×5本)/Cerebras/Featherless各APIキー、Discord Bot/OAuthクレデンシャル、Postgresパスワード、litellm master keyなど
+- 秘密情報: `/opt/dccai/.env`(git管理外、root専用)。DeepSeek/Gemini(×5本)/Cerebras/Featherless各APIキー、Cloudflare Tunnel token、Discord Bot/OAuthクレデンシャル、Postgresパスワード、litellm master keyなど
 - litellm管理画面: `ssh -L 4000:localhost:4000 gunk@100.100.252.10` → `http://localhost:4000/ui`(127.0.0.1限定のため要ポートフォワード)
 - Pipe更新の反映: `bash /opt/dccai/scripts/sync_pipe_to_db.sh`
 
@@ -189,11 +192,9 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 Discordナレッジ同期の扱いは別途ユーザー指示待ち。Geminiヘルスチェックは再登録しない。
 
-### 11.2 【要検討】Tailscale SSHがOOM保護されていない
+### 11.2 Tailscale・DockerのOOM保護
 
-`/opt/dccai/scripts/dccai-oom-protect.sh`というスクリプトファイル自体は存在する(旧メモリにある「自動復旧しないものは守る」ポリシーの実装、tailscaled/dockerd/containerdのoom_score_adjを下げる想定)が、**これも対応する`.timer`がn200に登録されておらず、実際に`tailscaled`プロセスの`oom_score_adj`を確認したところ`0`(無保護)だった**。
-
-n200は**sshd非稼働でTailscale SSHが唯一の遠隔操作手段**なので、メモリ逼迫時にtailscaledがOOM Killerに殺されると詰む(現に2026-07-30にpython3プロセスへのOOM Kill実績が2件ある)。現在RAM 15GB中11GB使用・swap 1.5GB/4GB使用と余裕は少なくない状態が続いており、**リスクとして放置されている**。
+`dccai-oom-protect.timer`を5分ごとに実行し、tailscaled/dockerd/containerdへOOM優先度を再適用する。サービス再起動時にも再設定されるようsystemd drop-inを併用する。
 
 ### 11.3 直近1ヶ月の運用実績(安定稼働)
 
@@ -211,7 +212,7 @@ n200は**sshd非稼働でTailscale SSHが唯一の遠隔操作手段**なので�
 
 ### 11.5 git remoteとの乖離
 
-`/opt/dccai`はGitHub(`github-dccai:M11GJ/DCC-AI.git`)をoriginに持つが、Web検索RAG修正コミット後は**ローカルがorigin/masterより4コミット先行**する。Responses API改修、実機再調査SPEC更新、モデル／マルチモーダル更新、Web検索RAG修正が未push。**GitHubからcloneして作業を引き継ぐ場合、これらが欠落する点に注意**。push可否はユーザー確認の上で対応すること。
+`/opt/dccai`はGitHub(`github-dccai:M11GJ/DCC-AI.git`)をoriginに持つ。2026-08-21のモデル・JST・API・セキュリティ修正を含めてpushし、引き継ぎ元をGitHubへ統一する。保守作業後は`git status --short --branch`でahead/behindを必ず確認する。
 
 ---
 

@@ -59,46 +59,28 @@ model_list:
       rpm: 30
     model_info: { id: "DeepSeek V4 Flash Vision Exp (Max Effort)", input_cost_per_token: 0, output_cost_per_token: 0 }
 
-  # ---- High(フォールバック)：Cerebras と DeepSeek V3 (Featherless) を並列で負荷分散（ラウンドロビン） ----
-  - model_name: dccai-high-legacy
-    litellm_params:
-      model: cerebras/llama-3.3-70b
-      api_key: os.environ/CEREBRAS_API_KEY
-      rpm: 30
-    model_info: { id: "Cerebras Llama-3.3-70b", input_cost_per_token: 0, output_cost_per_token: 0 }
-
-  - model_name: dccai-high-legacy
-    litellm_params:
-      model: openai/deepseek-ai/DeepSeek-V3-0324
-      api_base: https://api.featherless.ai/v1
-      api_key: os.environ/FEATHERLESS_API_KEY
-      rpm: 30
-    model_info: { id: "DeepSeek-V3 (Featherless)", input_cost_per_token: 0, output_cost_per_token: 0 }
-
-  # ---- Code：DeepSeek V4 Flash (0731) / max effort ----
+  # ---- Code：DeepSeek V4 Flash Vision Experimental / max effort ----
   - model_name: dccai-code
     litellm_params:
-      model: deepseek/deepseek-v4-flash
+      # CodeもHigh/Lowと同じネイティブマルチモーダルモデルを使う。
+      # 公開ID(dccai-code)は変更しない。
+      model: openai/deepseek-v4-flash-vision-exp
+      api_base: https://api.deepseek.com
       api_key: os.environ/DEEPSEEK_API_KEY
+      allowed_openai_params: [reasoning_effort]
       reasoning_effort: max
-      thinking: { type: enabled }
+      extra_body:
+        thinking: { type: enabled }
       rpm: 30
-    model_info: { id: "DeepSeek V4 Flash (0731, Max Effort)", input_cost_per_token: 0, output_cost_per_token: 0 }
-
-  # ---- Backup Low：DeepSeek系が使えない時のフェイルオーバー ----
-  - model_name: dccai-backup-low
-    litellm_params:
-      model: openai/Qwen/Qwen2.5-7B-Instruct
-      api_base: https://api.featherless.ai/v1
-      api_key: os.environ/FEATHERLESS_API_KEY
-      rpm: 60
-    model_info: { id: "Qwen-2.5-7B (Featherless Backup)", input_cost_per_token: 0, output_cost_per_token: 0 }
+    model_info: { id: "DeepSeek V4 Flash Vision Exp Code (Max Effort)", input_cost_per_token: 0, output_cost_per_token: 0 }
 
 litellm_settings:
   num_retries: 2
   request_timeout: 1200
-  # 公開model_nameは固定。Geminiは一時停止し、既存の非Gemini系バックアップだけを残す。
-  fallbacks: [{"dccai-high": ["dccai-high-legacy"]}, {"dccai-high-legacy": ["dccai-low"]}, {"dccai-low": ["dccai-backup-low"]}, {"dccai-code": ["dccai-high"]}]
+  # 旧Cerebras/Featherless経路は契約・モデル廃止で失敗するため削除。
+  # 同じDeepSeekキーへ別名でフォールバックしても冗長化にならず、モデル別集計も
+  # 汚すため、自動リトライだけを使う。新しい有効な別プロバイダーを用意した時に再設定する。
+  fallbacks: []
   callbacks: ["prometheus"]
   require_auth_for_metrics_endpoint: false
 

@@ -4,15 +4,18 @@
 
 | 項目 | 内容 |
 |---|---|
-| 実行タイミング | 毎日 03:00（systemd timer: `dccai-backup.timer`） |
+| 実行タイミング | 毎日 03:00 JST（systemd timer: `dccai-backup.timer`） |
 | 保存先（主） | `/opt/dccai/backups/<日時>/` |
-| 保存先（副） | `/mnt/c/Users/DCC05/dccai_backups/<日時>/` |
+| 保存先（副） | `OFFSITE_BACKUP_DIR`で指定した別ディスク/NAS（任意） |
 | 世代管理 | 直近7世代を保持（古いものは自動削除） |
 | バックアップ内容 | `webui.db`（SQLite整合バックアップ）＋設定ファイル一式 |
 
-> ⚠️ **残存リスク**: バックアップは単一マシン上にのみ存在します。
-> ディスク故障・PC盗難・OS障害には対抗できません。
-> 将来的に Mac rsync / クラウドストレージ等への退避を検討してください。
+バックアップは`umask 077`で作成され、root以外からは読み取れません。
+別ディスク/NASをマウントしてsystemdサービスに`OFFSITE_BACKUP_DIR`を設定すると、
+各世代を同時コピーできます。未設定時はログに警告を残します。
+
+設定ファイルは`/etc/default/dccai-backup`です。例は
+`/opt/dccai/scripts/dccai-backup.default.example`にあります。
 
 ---
 
@@ -101,4 +104,4 @@ ls "${CONFIG_DIR}"
 - [ ] `curl https://ai.shu-dcc.net/health` → 200
 - [ ] `docker compose ps` → 全コンテナ running
 - [ ] 管理者アカウントでログイン可能
-- [ ] 一般ユーザー視点チェック（HANDOFF.md §7）→ モデル2件表示
+- [ ] 一般ユーザー視点チェック（HANDOFF.md §7）→ モデル3件表示

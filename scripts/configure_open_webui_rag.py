@@ -7,6 +7,7 @@ import time
 
 
 DB_PATH = "/app/backend/data/webui.db"
+STALE_MODEL_IDS = ("dccai.dccai-high", "dccai.dccai-low")
 
 RAG_TEMPLATE = """### Task:
 Answer the user's query using the retrieved context below.
@@ -55,9 +56,22 @@ def main():
             raise RuntimeError("DCC AI Code model row was not found")
         meta = json.loads(row[0]) if row[0] else {}
         meta["knowledge"] = []
+        capabilities = meta.setdefault("capabilities", {})
+        capabilities["vision"] = True
         conn.execute(
             "UPDATE model SET meta = ?, updated_at = ? WHERE id = ?",
             (json.dumps(meta, ensure_ascii=False), now, "dccai.dccai-code"),
+        )
+
+        # vision接尾辞なしの旧High/Lowは同名で表示され、ナレッジ設定も異なるため削除する。
+        placeholders = ",".join("?" for _ in STALE_MODEL_IDS)
+        conn.execute(
+            f"DELETE FROM access_grant WHERE resource_type = 'model' AND resource_id IN ({placeholders})",
+            STALE_MODEL_IDS,
+        )
+        conn.execute(
+            f"DELETE FROM model WHERE id IN ({placeholders})",
+            STALE_MODEL_IDS,
         )
         conn.commit()
     except Exception:
@@ -67,7 +81,8 @@ def main():
         conn.close()
 
     print("Updated rag.template with explicit QUERY and web-search awareness")
-    print("Confirmed dccai.dccai-code knowledge=[]")
+    print("Confirmed dccai.dccai-code knowledge=[] and vision=true")
+    print("Removed stale DCC AI High/Low model rows and access grants")
 
 
 if __name__ == "__main__":

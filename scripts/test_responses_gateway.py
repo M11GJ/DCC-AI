@@ -28,9 +28,8 @@ class ResponsesGatewayTests(unittest.TestCase):
         }
         gateway.normalize_request_tools(payload)
         self.assertEqual(payload["tools"], [{"type": "function", **FUNCTION}])
-        self.assertEqual(
-            payload["tool_choice"], {"type": "function", "name": "get_weather"}
-        )
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertIn("get_weather", payload["instructions"])
 
     def test_fullwidth_dsml_becomes_function_call(self):
         response = {
@@ -143,6 +142,34 @@ class ResponsesGatewayTests(unittest.TestCase):
         events = list(gateway.response_sse_events(response))
         deltas = [e for e in events if e["type"] == "response.output_text.delta"]
         self.assertEqual([e["delta"] for e in deltas], ["Checking now."])
+
+    def test_reasoning_items_are_removed_but_answer_and_tool_calls_remain(self):
+        response = {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "reasoning_1",
+                    "content": [{"type": "reasoning_text", "text": "private chain"}],
+                },
+                {
+                    "type": "message",
+                    "id": "message_1",
+                    "content": [{"type": "output_text", "text": "Final answer"}],
+                },
+                {
+                    "type": "function_call",
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "arguments": "{}",
+                },
+            ]
+        }
+        self.assertEqual(gateway.sanitize_reasoning_output(response), 1)
+        self.assertEqual(
+            [item["type"] for item in response["output"]],
+            ["message", "function_call"],
+        )
+        self.assertEqual(response["output"][0]["content"][0]["text"], "Final answer")
 
 
 if __name__ == "__main__":

@@ -6,11 +6,13 @@ services:
     depends_on:
       - litellm
     ports:
-      - "3000:8080"                # 前段のリバースプロキシから 3000 へ
+      - "127.0.0.1:3000:8080"      # Cloudflare Tunnelからのみ到達可能
     volumes:
       - open-webui:/app/backend/data
     env_file:
       - ./open-webui.env
+    environment:
+      - TZ=Asia/Tokyo
     mem_limit: 1536m
     restart: unless-stopped
 
@@ -23,14 +25,13 @@ services:
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     environment:
-      - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY}
+      - TZ=Asia/Tokyo
       # Geminiプールは一時停止中。キーは.envに保持し、復活時に以下をコメント解除する。
       # - GEMINI_API_KEY_1=${GEMINI_API_KEY_1}
       # - GEMINI_API_KEY_2=${GEMINI_API_KEY_2}
       # - GEMINI_API_KEY_3=${GEMINI_API_KEY_3}
       # - GEMINI_API_KEY_4=${GEMINI_API_KEY_4}
       # - GEMINI_API_KEY_5=${GEMINI_API_KEY_5}
-      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - DATABASE_URL=${DATABASE_URL}
@@ -43,6 +44,7 @@ services:
     image: postgres:16-alpine
     container_name: dccai-postgres
     environment:
+      - TZ=Asia/Tokyo
       - POSTGRES_DB=litellm
       - POSTGRES_USER=litellm
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
@@ -55,7 +57,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: dccai-cloudflared
-    command: tunnel --no-autoupdate --protocol http2 run --token eyJhIjoiYTYwYWU2Y2RiNjhjMjU5YjZkOGZhOGM1YjM4NWNiMmEiLCJ0IjoiMmUyZGFhNTgtZTFjOS00OGJiLWIyY2QtNTYwNzI4YTM5MWYzIiwicyI6Ik5UZ3pOMll4TWpZdFl6YzBPQzAwT0RoaUxXSXpPVGN0TkRNd09Ea3pPVGM1TURnNCJ9
+    command: tunnel --no-autoupdate --protocol http2 run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     network_mode: host
     mem_limit: 256m
     restart: unless-stopped
@@ -68,10 +70,11 @@ services:
       - ./litellm/config.yaml:/app/config.yaml:ro
     command: python3 /app/routing_dashboard.py
     environment:
+      - TZ=Asia/Tokyo
       - PORT=3001
       - LITELLM_METRICS_URL=http://litellm:4000/metrics/
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     mem_limit: 128m
     restart: unless-stopped
 
@@ -88,6 +91,7 @@ services:
     # なのでpython:3.11-slimでもpip installだけで動く。
     command: sh -c "pip install --quiet --no-cache-dir psycopg2-binary && python3 /app/usage_page.py"
     environment:
+      - TZ=Asia/Tokyo
       - PORT=3002
       - PUBLIC_BASE_URL=https://usage.shu-dcc.net
       - REQUIRED_GUILD_ID=1304292402386964502
@@ -101,7 +105,7 @@ services:
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
       - USAGE_SESSION_SECRET=${USAGE_SESSION_SECRET}
     ports:
-      - "3002:3002"
+      - "127.0.0.1:3002:3002"
     mem_limit: 256m
     restart: unless-stopped
 
@@ -115,6 +119,8 @@ services:
     volumes:
       - ./searxng:/etc/searxng
       - searxng-cache:/var/cache/searxng
+    environment:
+      - TZ=Asia/Tokyo
     mem_limit: 512m
     restart: unless-stopped
 
@@ -128,6 +134,7 @@ services:
       - open-webui:/webui-data
     command: sh -c "pip install --quiet --no-cache-dir httpx && python3 /app/responses_gateway.py"
     environment:
+      - TZ=Asia/Tokyo
       - PORT=3003
       - LITELLM_BASE_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
@@ -137,7 +144,7 @@ services:
       - MONTHLY_TOKEN_LIMIT=10000000
       - CODE_MAX_CONCURRENCY=3
     ports:
-      - "3003:3003"
+      - "127.0.0.1:3003:3003"
     mem_limit: 256m
     restart: unless-stopped
 

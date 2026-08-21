@@ -206,9 +206,8 @@ def _jst_month_utc_range():
 
 
 def api_tokens_this_month(user_id: str) -> int:
-    """今月(JST暦月)のAPI経由トークン使用量。dccai_pipe.py の月間上限カウンタは
-    コンテナのUTC日付で暦月を切っているため、JST朝9時までの数時間は表示(JST基準)と
-    実際の上限判定(UTC基準)の対象月が1日分ズレうる点に注意(月初・月末のみの誤差)。"""
+    """今月(JST暦月)のAPI経由トークン使用量。
+    dccai_pipe.py / responses_gateway.py の上限判定も同じJST暦月で統一している。"""
     start, end = _jst_month_utc_range()
     try:
         rows = _pg_query(

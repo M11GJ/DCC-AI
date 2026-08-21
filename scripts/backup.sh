@@ -4,12 +4,14 @@
 # 実行: systemd timer dccai-backup.timer (毎日03:00) または手動
 # =============================================================================
 set -euo pipefail
+umask 077
 
 DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="/opt/dccai/backups/${DATE}"
-WIN_DIR="/mnt/c/Users/DCC05/dccai_backups/${DATE}"
 LOG_FILE="/opt/dccai/scripts/backup.log"
 KEEP_GENERATIONS=7
+# 別ディスク/NASをマウントしたパスを指定する。未設定時はローカルのみ。
+OFFSITE_BACKUP_DIR="${OFFSITE_BACKUP_DIR:-}"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE}"
@@ -26,7 +28,8 @@ log "バックアップ先: ${BACKUP_DIR}"
 log "webui.db のバックアップ開始..."
 
 # Python バックアップスクリプトを一時ファイルとして作成
-PYFILE="/tmp/dccai_db_backup_${DATE}.py"
+PYFILE=$(mktemp "/tmp/dccai_db_backup_${DATE}.XXXXXX.py")
+trap 'rm -f "${PYFILE}"' EXIT
 cat > "${PYFILE}" << 'PYEOF'
 import sqlite3, sys
 src, dst = sys.argv[1], sys.argv[2]
@@ -55,6 +58,7 @@ docker cp "open-webui:/app/backend/data/webui.db.bak_${DATE}" \
 # クリーンアップ
 docker exec open-webui rm -f "/app/backend/data/webui.db.bak_${DATE}"
 rm -f "${PYFILE}"
+trap - EXIT
 
 log "webui.db バックアップ完了: $(du -sh "${BACKUP_DIR}/webui.db" | cut -f1)"
 
@@ -72,42 +76,42 @@ for d in litellm branding scripts searxng; do
   [ -d "/opt/dccai/${d}" ] && cp -r "/opt/dccai/${d}" "${CONFIG_BACKUP}/" && log "  コピー: ${d}/"
 done
 log "設定ファイルのバックアップ完了"
+chmod -R go-rwx "${BACKUP_DIR}"
 
 # -------------------------------------------------------------------
-# 4. Windows 側にコピー（失敗しても警告を出して続行）
+# 4. 別ディスク/NASへコピー（設定されている場合）
 # -------------------------------------------------------------------
-WIN_COPY_OK=false
-if [ -d "/mnt/c/Users/DCC05" ]; then
-  log "Windows側へのコピー開始: ${WIN_DIR}"
-  if mkdir -p "${WIN_DIR}" && cp -r "${BACKUP_DIR}/." "${WIN_DIR}/"; then
-    log "Windows側コピー完了"
-    WIN_COPY_OK=true
+OFFSITE_COPY_OK=false
+if [ -n "${OFFSITE_BACKUP_DIR}" ]; then
+  if mountpoint -q "${OFFSITE_BACKUP_DIR}"; then
+    OFFSITE_DEST="${OFFSITE_BACKUP_DIR%/}/${DATE}"
+    log "オフサイトコピー開始: ${OFFSITE_DEST}"
+    if mkdir -p "${OFFSITE_DEST}" && cp -a "${BACKUP_DIR}/." "${OFFSITE_DEST}/"; then
+      chmod -R go-rwx "${OFFSITE_DEST}"
+      log "オフサイトコピー完了"
+      OFFSITE_COPY_OK=true
+    else
+      log "WARNING: オフサイトコピーに失敗（サーバ内バックアップは正常）"
+    fi
   else
-    log "WARNING: Windows側へのコピーに失敗（サーバ内バックアップは正常）"
+    log "WARNING: OFFSITE_BACKUP_DIRはマウントポイントではありません: ${OFFSITE_BACKUP_DIR}"
   fi
 else
-  log "WARNING: /mnt/c/Users/DCC05 が見つかりません（Windows側コピースキップ）"
+  log "WARNING: OFFSITE_BACKUP_DIR未設定（別ディスク/NASへのコピーなし）"
 fi
 
 # -------------------------------------------------------------------
 # 5. 世代管理（直近7世代を保持）
 # -------------------------------------------------------------------
 log "世代管理: サーバ内（保持: ${KEEP_GENERATIONS}世代）"
-OLD_SERVER=$(ls -dt /opt/dccai/backups/*/ 2>/dev/null | tail -n +"$((KEEP_GENERATIONS + 1))" || true)
-if [ -n "${OLD_SERVER}" ]; then
-  echo "${OLD_SERVER}" | xargs rm -rf
-  log "  古いバックアップを削除しました"
-else
-  log "  削除対象なし"
-fi
-
-if [ "${WIN_COPY_OK}" = "true" ]; then
-  OLD_WIN=$(ls -dt /mnt/c/Users/DCC05/dccai_backups/*/ 2>/dev/null | tail -n +"$((KEEP_GENERATIONS + 1))" || true)
-  if [ -n "${OLD_WIN}" ]; then
-    echo "${OLD_WIN}" | xargs rm -rf
-    log "  Windows側の古いバックアップを削除しました"
-  fi
-fi
+mapfile -t OLD_SERVER < <(find /opt/dccai/backups -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n +"$((KEEP_GENERATIONS + 1))" | cut -d' ' -f2-)
+for old_dir in "${OLD_SERVER[@]}"; do
+  case "${old_dir}" in
+    /opt/dccai/backups/*) rm -rf -- "${old_dir}" ;;
+    *) log "WARNING: 想定外の削除対象を拒否: ${old_dir}" ;;
+  esac
+done
+[ "${#OLD_SERVER[@]}" -gt 0 ] && log "  古いバックアップを削除しました" || log "  削除対象なし"
 
 # -------------------------------------------------------------------
 # 6. 完了サマリー
@@ -116,6 +120,4 @@ BACKUP_SIZE=$(du -sh "${BACKUP_DIR}" | cut -f1)
 log "=== バックアップ完了 ==="
 log "  保存先:    ${BACKUP_DIR} (${BACKUP_SIZE})"
 log "  DB:        ${BACKUP_DIR}/webui.db"
-log "  Windows:   ${WIN_COPY_OK}"
-log "  [残存リスク] バックアップは単一マシン上のみ（物理障害に非対応）"
-log "  [将来課題]  Mac rsync / 外付けディスク等への退避を検討してください"
+log "  オフサイト: ${OFFSITE_COPY_OK}"

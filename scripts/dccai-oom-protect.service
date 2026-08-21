@@ -1,0 +1,8 @@
+[Unit]
+Description=Protect DCC AI remote access and container runtime from OOM killer
+After=tailscaled.service docker.service containerd.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/dccai/scripts/dccai-oom-protect.sh
+

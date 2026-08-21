@@ -1,0 +1,3 @@
+# Mount a separate disk/NAS first, then set its mount point here.
+# OFFSITE_BACKUP_DIR=/mnt/dccai-offsite
+

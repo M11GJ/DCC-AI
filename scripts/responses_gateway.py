@@ -20,7 +20,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import date
+from datetime import datetime, timedelta, timezone
 from http import server as http_server
 from urllib.parse import urlparse
 
@@ -39,6 +39,11 @@ CODE_MAX_CONCURRENCY = int(os.environ.get("CODE_MAX_CONCURRENCY", "1"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "1200"))
 
 _code_sem = threading.Semaphore(CODE_MAX_CONCURRENCY)
+JST = timezone(timedelta(hours=9), "JST")
+
+
+def current_jst_month() -> str:
+    return datetime.now(JST).strftime("%Y-%m")
 
 
 def resolve_user(api_key: str):
@@ -88,14 +93,14 @@ def month_tokens_used(user_id: str) -> int:
             data = json.load(f)
     except Exception:
         data = {}
-    month = date.today().strftime("%Y-%m")
+    month = current_jst_month()
     return int(data.get(month, {}).get(user_id, 0))
 
 
 def add_tokens(user_id: str, n: int) -> None:
     if n <= 0:
         return
-    month = date.today().strftime("%Y-%m")
+    month = current_jst_month()
 
     def mutate(data):
         data = {month: data.get(month, {})}  # 当月分だけ残して掃除(dccai_pipe.pyと同じ挙動)
@@ -147,7 +152,27 @@ def normalize_request_tools(payload: dict) -> None:
     if isinstance(choice, dict) and choice.get("type") == "function":
         nested = choice.get("function")
         if isinstance(nested, dict) and not choice.get("name") and nested.get("name"):
-            payload["tool_choice"] = {"type": "function", "name": nested["name"]}
+            choice = {"type": "function", "name": nested["name"]}
+            payload["tool_choice"] = choice
+
+    # DeepSeek thinking modeはfunction強制指定/requiredを受け付けない。
+    # autoへ正規化し、Responses APIのinstructionsで強制意図を保持する。
+    forced_name = None
+    choice = payload.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") == "function":
+        forced_name = choice.get("name")
+        payload["tool_choice"] = "auto"
+    elif choice == "required":
+        payload["tool_choice"] = "auto"
+
+    tool_instruction = None
+    if isinstance(forced_name, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", forced_name):
+        tool_instruction = f"For this request, you must call the `{forced_name}` tool and must not answer directly."
+    elif choice == "required":
+        tool_instruction = "For this request, you must call one of the provided tools and must not answer directly."
+    if tool_instruction:
+        existing = payload.get("instructions")
+        payload["instructions"] = f"{existing}\n{tool_instruction}" if existing else tool_instruction
 
 
 _DSML = r"[|｜]DSML[|｜]"
@@ -274,6 +299,38 @@ def normalize_dsml_response(response: dict, request_payload: dict) -> bool:
                 )
     response["output"] = rebuilt
     return converted
+
+
+def sanitize_reasoning_output(response: dict) -> int:
+    """内部の推論過程を公開Responses APIの出力から除外する。
+
+    DeepSeek/LiteLLMはreasoning itemのcontentに生の推論文を入れる場合がある。
+    最終回答・function/custom tool callは維持し、reasoning itemとreasoning系content
+    だけを落とす。戻り値は除去したitem/part数。
+    """
+    output = response.get("output")
+    if not isinstance(output, list):
+        return 0
+    removed = 0
+    cleaned_output = []
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            removed += 1
+            continue
+        if isinstance(item, dict) and isinstance(item.get("content"), list):
+            content = []
+            for part in item["content"]:
+                if isinstance(part, dict) and part.get("type") in {
+                    "reasoning_text",
+                    "reasoning_summary",
+                }:
+                    removed += 1
+                    continue
+                content.append(part)
+            item = {**item, "content": content}
+        cleaned_output.append(item)
+    response["output"] = cleaned_output
+    return removed
 
 
 def response_sse_events(response: dict):
@@ -457,10 +514,9 @@ class Handler(http_server.BaseHTTPRequestHandler):
             "Content-Type": "application/json",
         }
         try:
-            # DSMLはストリーム途中では通常のoutput_text deltaと区別できず、転送後に
-            # 取り消せない。ツール付きstreamだけ上流を一旦non-streamで受け、DSMLを
-            # 正規化してから標準SSEを組み立てる。通常テキストstreamは従来どおり中継。
-            if stream and payload.get("tools"):
+            # DSMLと内部reasoningはストリーム途中で転送すると後から取り消せないため、
+            # stream指定時も上流を一旦non-streamで受け、安全化した標準SSEを返す。
+            if stream:
                 upstream_payload = dict(payload)
                 upstream_payload["stream"] = False
                 with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
@@ -478,6 +534,7 @@ class Handler(http_server.BaseHTTPRequestHandler):
 
                     resp_json = r.json()
                     normalize_dsml_response(resp_json, payload)
+                    sanitize_reasoning_output(resp_json)
                     usage = resp_json.get("usage") or {}
                     if usage.get("total_tokens"):
                         add_tokens(user_id, usage["total_tokens"])
@@ -492,29 +549,6 @@ class Handler(http_server.BaseHTTPRequestHandler):
                         self.wfile.write(f"event: {event_type}\ndata: {data}\n\n".encode())
                         self.wfile.flush()
                     self.close_connection = True
-            elif stream:
-                with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-                    with client.stream("POST", url, json=payload, headers=headers) as r:
-                        self.send_response(r.status_code)
-                        self.send_header("Content-Type", r.headers.get("content-type", "text/event-stream"))
-                        self.end_headers()
-                        captured_tokens = 0
-                        for line in r.iter_lines():
-                            if not line:
-                                continue
-                            self.wfile.write((line + "\n\n").encode())
-                            if line.startswith("data:"):
-                                data_str = line[5:].strip()
-                                if data_str and data_str != "[DONE]":
-                                    try:
-                                        chunk = json.loads(data_str)
-                                        usage = (chunk.get("response") or chunk).get("usage")
-                                        if usage and usage.get("total_tokens"):
-                                            captured_tokens = usage["total_tokens"]
-                                    except Exception:
-                                        pass
-                        if captured_tokens:
-                            add_tokens(user_id, captured_tokens)
             else:
                 with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
                     r = client.post(url, json=payload, headers=headers)
@@ -523,6 +557,7 @@ class Handler(http_server.BaseHTTPRequestHandler):
                         resp_json = r.json()
                         if r.status_code < 400:
                             normalize_dsml_response(resp_json, payload)
+                            sanitize_reasoning_output(resp_json)
                             body = json.dumps(
                                 resp_json, ensure_ascii=False, separators=(",", ":")
                             ).encode()

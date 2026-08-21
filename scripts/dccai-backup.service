@@ -1,0 +1,13 @@
+[Unit]
+Description=DCC AI Backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/dccai-backup
+ExecStart=/bin/bash /opt/dccai/scripts/backup.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dccai-backup
+

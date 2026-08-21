@@ -3,6 +3,10 @@ open-webui.env
 worker/config.json
 *.log
 backups/
+*.bak
+*.bak-*
+*.bak.*
+._*
 __pycache__/
 *.pyc
 searxng/secret_key

@@ -14,7 +14,7 @@ import re
 import base64
 import glob
 import mimetypes
-from datetime import date
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Awaitable, Any
 
 import httpx
@@ -25,6 +25,28 @@ from pydantic import BaseModel, Field
 # セマフォで管理すると cap 変更のたびに作り直されて壊れるため分離している。
 # モデル系統ごとのcapは独立して変更できる。
 _STATE_BY_GROUP = {}
+JST = timezone(timedelta(hours=9), "JST")
+
+
+def _today_jst() -> str:
+    return datetime.now(JST).strftime("%Y-%m-%d")
+
+
+def _month_jst() -> str:
+    return datetime.now(JST).strftime("%Y-%m")
+
+
+def _strip_reasoning_fields(value):
+    """外部Chat API応答から内部の推論文だけを再帰的に除外する。"""
+    if isinstance(value, dict):
+        for key in ("reasoning_content", "reasoning_text", "reasoning_summary"):
+            value.pop(key, None)
+        for child in value.values():
+            _strip_reasoning_fields(child)
+    elif isinstance(value, list):
+        for child in value:
+            _strip_reasoning_fields(child)
+    return value
 
 
 def _get_group_state(group: str, cap: int) -> dict:
@@ -52,10 +74,6 @@ class Pipe:
         )
         CODE_UPSTREAM: str = Field(
             default="dccai-code", description="LiteLLM 側の Code モデル名"
-        )
-        VISION_UPSTREAM: str = Field(
-            default="dccai-high",
-            description="画像非対応モデルに画像が送られた場合の転送先（マルチモーダル対応必須）",
         )
         MAX_CONCURRENCY: int = Field(
             default=3,
@@ -113,7 +131,7 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
 
-    # Open WebUI に 2 つのモデルとして出す
+    # Open WebUI に3つのモデルとして出す
     def pipes(self):
         return [
             {
@@ -140,7 +158,7 @@ class Pipe:
                 "id": "dccai-code",
                 "name": "DCC AI Code",
                 "meta": {
-                    "vision": False,
+                    "vision": True,
                     "capabilities": {
                         "citations": False
                     }
@@ -166,7 +184,7 @@ class Pipe:
 
     def _high_used_today(self, user_id: str) -> int:
         data = self._load_usage()
-        today = date.today().isoformat()
+        today = _today_jst()
         return int(data.get(today, {}).get(user_id, 0))
 
     # ---- ファイルベースカウンタの排他ロック付きread-modify-write ----
@@ -194,7 +212,7 @@ class Pipe:
             pass
 
     def _incr_high(self, user_id: str) -> None:
-        today = date.today().isoformat()
+        today = _today_jst()
 
         def mutate(data):
             data = {today: data.get(today, {})}  # 当日分だけ残して掃除
@@ -213,13 +231,13 @@ class Pipe:
 
     def _month_tokens_used(self, user_id: str) -> int:
         data = self._load_token_usage()
-        month = date.today().strftime("%Y-%m")
+        month = _month_jst()
         return int(data.get(month, {}).get(user_id, 0))
 
     def _add_tokens(self, user_id: str, n: int) -> None:
         if n <= 0:
             return
-        month = date.today().strftime("%Y-%m")
+        month = _month_jst()
 
         def mutate(data):
             data = {month: data.get(month, {})}  # 当月分だけ残して掃除
@@ -301,11 +319,9 @@ class Pipe:
             messages = [{"role": "system", "content": self.valves.SYSTEM_PROMPT}] + messages
 
         # ---- 画像入力 ----
-        # High/Lowはネイティブマルチモーダルモデルなので、画像を説明文へ変換せず
-        # OpenAI互換のimage_url形式のまま上流へ渡す。画像非対応のCodeへ画像が来た
-        # 場合だけ、VISION_UPSTREAM (High)へリクエスト全体を転送する。
+        # High/Low/Codeはすべてネイティブマルチモーダルモデルなので、画像を
+        # 説明文へ変換せずOpenAI互換のimage_url形式のまま選択モデルへ渡す。
         processed_messages = []
-        code_has_image = False
         for msg in messages:
             content = msg.get("content", "")
             
@@ -353,15 +369,10 @@ class Pipe:
                         "image_url": {"url": url},
                     })
                 processed_messages.append({**msg, "content": content_list})
-                if is_code:
-                    code_has_image = True
             else:
                 processed_messages.append({**msg, "content": combined_text})
 
         messages = processed_messages
-        if code_has_image:
-            upstream = self.valves.VISION_UPSTREAM
-
         payload = {
             "model": upstream,
             "messages": messages,
@@ -372,9 +383,53 @@ class Pipe:
             # ストリーミング末尾にusageチャンクを含めてもらう(Open WebUI管理者ダッシュボードの
             # トークン集計は、この形式のusageチャンクをSSEから拾って記録しているため必須)
             payload["stream_options"] = {"include_usage": True}
-        for k in ("temperature", "top_p", "max_tokens"):
+        # OpenAI互換Chat Completionsの主要オプションを落とさずに転送する。
+        # reasoning_effortは各公開モデルのサーバー側設定を必ず使うため転送しない。
+        for k in (
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "max_completion_tokens",
+            "stop",
+            "seed",
+            "presence_penalty",
+            "frequency_penalty",
+            "n",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "response_format",
+        ):
             if body.get(k) is not None:
                 payload[k] = body[k]
+
+        # DeepSeekのthinking modeは特定functionの強制指定/requiredを400で拒否する。
+        # API互換性を保つため上流指定はautoへ落とし、同じ意図をsystem指示で補う。
+        # auto/noneはそのまま通す。
+        if payload.get("tools"):
+            choice = payload.get("tool_choice")
+            forced_name = None
+            if isinstance(choice, dict) and choice.get("type") == "function":
+                nested = choice.get("function")
+                if isinstance(nested, dict):
+                    forced_name = nested.get("name")
+                forced_name = forced_name or choice.get("name")
+                payload["tool_choice"] = "auto"
+            elif choice == "required":
+                payload["tool_choice"] = "auto"
+
+            tool_instruction = None
+            if isinstance(forced_name, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", forced_name):
+                tool_instruction = (
+                    f"For this request, you must call the `{forced_name}` tool and must not answer directly."
+                )
+            elif choice == "required":
+                tool_instruction = "For this request, you must call one of the provided tools and must not answer directly."
+            if tool_instruction:
+                payload["messages"] = [
+                    {"role": "system", "content": tool_instruction},
+                    *payload["messages"],
+                ]
 
         # ---- 同時実行セマフォ＋順番待ちの見える化（④） ----
         # グループ(default=High/Low, code=Code)ごとに別セマフォ・別カウンタを使う
@@ -447,6 +502,11 @@ class Pipe:
                                                             chunk_usage = chunk.get("usage")
                                                             if chunk_usage and chunk_usage.get("total_tokens"):
                                                                 captured_tokens = chunk_usage["total_tokens"]
+                                                            if is_api_call:
+                                                                _strip_reasoning_fields(chunk)
+                                                                line = "data: " + json.dumps(
+                                                                    chunk, ensure_ascii=False, separators=(",", ":")
+                                                                )
                                                         except Exception:
                                                             pass
                                                 yield line + "\n"
@@ -488,6 +548,8 @@ class Pipe:
                         if r.status_code != 200:
                             return f"Error {r.status_code}: {r.text}"
                         resp_json = r.json()
+                        if is_api_call:
+                            _strip_reasoning_fields(resp_json)
                         usage = resp_json.get("usage") or {}
                         if is_api_call and usage.get("total_tokens"):
                             self._add_tokens(user_id, usage["total_tokens"])
