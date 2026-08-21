@@ -92,6 +92,13 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - **画像処理**: High/Lowはどちらもネイティブマルチモーダルモデルのため、画像を`image_url`形式のまま各モデルへ直接渡す。画像を説明文へ変換するGemini/Ollamaの中間処理は使用しない。画像非対応のCodeへ画像が送られた場合のみ`VISION_UPSTREAM`(既定`dccai-high`)へ転送する
 - **ストリーミング**: `stream_options.include_usage`を要求し、SSE末尾のusageチャンクからトークン数を取得(Open WebUI管理者ダッシュボードのトークン表示・月間カウンタ更新の両方に必要)
 
+### 4.1 Web検索・ナレッジ
+
+- Web検索はOpen WebUI → SearXNG(`http://searxng:8080`)で実行し、取得結果を`<source resource-type="web_search">`形式のRAGコンテキストとしてPipeへ渡す
+- 永続設定`config.rag.template`には元の質問を`{{QUERY}}`で必ず含める。Web検索ソースが存在する場合は「このリクエストでDCC AIの検索機能が実行済み」とモデルへ明示し、検索不能という定型的な断りを返させない
+- RAGテンプレートとモデル接続設定の再適用は`bash /opt/dccai/scripts/apply_open_webui_rag.sh`。実体は`scripts/configure_open_webui_rag.py`で、実行前にOpen WebUI DBの手動バックアップを作成する
+- DCC DiscordナレッジはHigh/Lowへ接続。Codeは`meta.knowledge=[]`として明示的に未接続
+
 反映方法: `dccai_pipe.py`を編集後、`bash /opt/dccai/scripts/sync_pipe_to_db.sh`でOpen WebUIのSQLite(`function`テーブル)へ書き込み+open-webui再起動が必要(ファイルを置くだけでは反映されない)。
 
 ---
@@ -204,7 +211,7 @@ n200は**sshd非稼働でTailscale SSHが唯一の遠隔操作手段**なので�
 
 ### 11.5 git remoteとの乖離
 
-`/opt/dccai`はGitHub(`github-dccai:M11GJ/DCC-AI.git`)をoriginに持つが、今回のモデル更新コミット後は**ローカルがorigin/masterより3コミット先行**する。Responses API改修、実機再調査SPEC更新、今回のモデル／マルチモーダル更新が未push。**GitHubからcloneして作業を引き継ぐ場合、これらが欠落する点に注意**。push可否はユーザー確認の上で対応すること。
+`/opt/dccai`はGitHub(`github-dccai:M11GJ/DCC-AI.git`)をoriginに持つが、Web検索RAG修正コミット後は**ローカルがorigin/masterより4コミット先行**する。Responses API改修、実機再調査SPEC更新、モデル／マルチモーダル更新、Web検索RAG修正が未push。**GitHubからcloneして作業を引き継ぐ場合、これらが欠落する点に注意**。push可否はユーザー確認の上で対応すること。
 
 ---
 

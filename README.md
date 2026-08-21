@@ -41,6 +41,9 @@ cd /opt/dccai && docker compose logs -f open-webui
 bash /opt/dccai/scripts/backup.sh
 
 # Geminiは現在一時停止中。gemini-key-health.pyは再有効化するまで実行しない
+
+# Web検索/RAGテンプレートとCodeのナレッジ未接続設定をDBへ反映
+bash /opt/dccai/scripts/apply_open_webui_rag.sh
 ```
 
 ---
