@@ -91,6 +91,7 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定
   - WebUI呼び出しとAPI呼び出しの区別は`__metadata__.chat_id`の有無で判定(`is_api_call`)
   - litellm側の集計用`user`フィールドも`<user_id>:api`(API)/`<user_id>`(WebUI)で分離
+  - モデル更新等で枠だけをリセットする場合は`scripts/reset_monthly_token_limit.py`をOpen WebUIコンテナ内で実行する。Postgresの全利用記録は残し、リセット前カウンターをJSONL監査ログとスナップショットへ保存したうえで現在枠だけ0にする。使用量ページは「総記録」と「現在の制限枠」を分けて表示する
 - **時刻基準**: High日次上限・API月間上限はどちらもJST(Asia/Tokyo)の暦日・暦月で判定
 - **画像処理**: High/Low/Codeすべてネイティブマルチモーダルモデルのため、画像を`image_url`形式のまま選択モデルへ直接渡す。別モデルへの画像転送やGemini/Ollamaの中間処理は使用しない
 - **API互換オプション**: `tools`/`tool_choice`/`response_format`/`stop`等の主要Chat Completions指定をLiteLLMへ転送する

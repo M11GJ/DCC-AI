@@ -38,6 +38,10 @@ LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://litellm:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 WEBUI_DB_PATH = os.environ.get("WEBUI_DB_PATH", "/webui-data/webui.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+TOKEN_USAGE_FILE = os.environ.get("TOKEN_USAGE_FILE", "/webui-data/dcc_ai_token_usage.json")
+TOKEN_RESET_LOG_FILE = os.environ.get(
+    "TOKEN_RESET_LOG_FILE", "/webui-data/dcc_ai_token_usage_resets.jsonl"
+)
 # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を手動で同期させること
 # (Open WebUIの管理画面でValvesを変更した場合はこちらの環境変数も合わせて変更が必要)。
 MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "10000000"))
@@ -206,41 +210,46 @@ def _jst_month_utc_range():
 
 
 def api_tokens_this_month(user_id: str) -> int:
-    """今月(JST暦月)のAPI経由トークン使用量。
-    dccai_pipe.py / responses_gateway.py の上限判定も同じJST暦月で統一している。"""
-    start, end = _jst_month_utc_range()
+    """現在の制限枠で消費したAPIトークン数。
+    Postgresの総記録ではなく、Pipe/Responsesが上限判定に使うカウンターを読む。"""
     try:
-        rows = _pg_query(
-            'SELECT COALESCE(sum(total_tokens), 0) AS total FROM "LiteLLM_SpendLogs" '
-            'WHERE end_user = %s AND "startTime" >= %s AND "startTime" < %s',
-            (f"{user_id}:api", start, end),
-        )
-        return int(rows[0]["total"]) if rows else 0
+        with open(TOKEN_USAGE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        month = datetime.now(JST).strftime("%Y-%m")
+        return int(data.get(month, {}).get(user_id, 0))
     except Exception:
         return 0
 
 
 def api_tokens_this_month_all_users():
-    """管理者用: 今月(JST暦月)のAPI経由トークン使用量をユーザー単位で集計する
-    (月間上限チェック・api_tokens_this_month と同じ基準)。"""
-    start, end = _jst_month_utc_range()
+    """管理者用: 現在の制限枠で消費したAPIトークン数。"""
     try:
-        rows = _pg_query(
-            'SELECT end_user, sum(total_tokens) AS total FROM "LiteLLM_SpendLogs" '
-            "WHERE end_user LIKE '%%:api' AND \"startTime\" >= %s AND \"startTime\" < %s "
-            "GROUP BY end_user",
-            (start, end),
-        )
+        with open(TOKEN_USAGE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        month = datetime.now(JST).strftime("%Y-%m")
+        return {user_id: int(total) for user_id, total in data.get(month, {}).items()}
     except Exception:
         return {}
-    per_user = {}
-    for row in rows:
-        eu = row.get("end_user") or ""
-        if not eu:
-            continue
-        base = eu[: -len(":api")] if eu.endswith(":api") else eu
-        per_user[base] = int(row.get("total") or 0)
-    return per_user
+
+
+def token_limit_reset_note() -> str:
+    """今月最後の制限枠リセットを画面表示用HTMLとして返す。"""
+    month = datetime.now(JST).strftime("%Y-%m")
+    try:
+        with open(TOKEN_RESET_LOG_FILE, encoding="utf-8") as f:
+            events = [json.loads(line) for line in f if line.strip()]
+        event = next((e for e in reversed(events) if e.get("month") == month), None)
+        if not event:
+            return ""
+        reset_at = datetime.fromisoformat(event["reset_at"]).astimezone(JST)
+        reason = event.get("reason") or "管理者によるリセット"
+        return (
+            '<p class="muted" style="margin:6px 0 0;">'
+            f'制限枠は {reset_at.strftime("%Y-%m-%d %H:%M JST")} にリセット済み'
+            f'（{reason}）。リセット前の利用記録は総利用量に保持されています。</p>'
+        )
+    except Exception:
+        return ""
 
 
 def total_tokens_this_month_all_users():
@@ -490,6 +499,7 @@ PAGE_TEMPLATE = """<!doctype html>
     <div class="limit-track"><div class="limit-fill" style="width:{limit_pct}%; background:{limit_color};"></div></div>
     <div class="row" style="border-bottom:none;"><span>{api_month:,} トークン使用</span><span>残り {limit_remaining_pct}%</span></div>
     <p class="muted" style="margin:6px 0 0;">この上限は<strong>API経由の利用のみ</strong>が対象です。WebUI(チャット画面)の利用は含まれません。</p>
+    {reset_note}
   </div>
   <div class="card">
     <div class="muted" style="margin-bottom:8px">モデル別内訳(WebUI+API合算)</div>
@@ -608,6 +618,7 @@ ADMIN_TEMPLATE = """<!doctype html>
 
   <div class="card">
     <div class="muted" style="margin-bottom:8px;">今月のAPI利用状況(月間上限: {monthly_limit:,} トークン/人。WebUIチャットは対象外)</div>
+    {reset_note}
     {monthly_api_rows}
   </div>
 
@@ -925,6 +936,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rank_rows=rank_rows,
                 monthly_limit=MONTHLY_TOKEN_LIMIT,
                 monthly_api_rows=monthly_api_rows,
+                reset_note=token_limit_reset_note(),
                 model_bar_rows=model_bar_rows,
                 model_table_rows=model_table_rows,
                 webui_api_rows=webui_api_rows,
@@ -961,6 +973,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             limit_pct=limit_pct,
             limit_remaining_pct=limit_remaining_pct,
             limit_color=limit_color,
+            reset_note=token_limit_reset_note(),
         )
         self._send(200, body)
 

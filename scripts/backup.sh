@@ -62,6 +62,21 @@ trap - EXIT
 
 log "webui.db バックアップ完了: $(du -sh "${BACKUP_DIR}/webui.db" | cut -f1)"
 
+# 利用制限カウンターとリセット監査記録も同じ世代へ保存する。
+for usage_file in \
+  dcc_ai_high_usage.json \
+  dcc_ai_token_usage.json \
+  dcc_ai_token_usage_resets.jsonl; do
+  if docker exec open-webui test -f "/app/backend/data/${usage_file}"; then
+    docker cp "open-webui:/app/backend/data/${usage_file}" "${BACKUP_DIR}/${usage_file}"
+  fi
+done
+if docker exec open-webui test -d "/app/backend/data/dcc_ai_token_usage_reset_snapshots"; then
+  docker cp "open-webui:/app/backend/data/dcc_ai_token_usage_reset_snapshots" \
+    "${BACKUP_DIR}/dcc_ai_token_usage_reset_snapshots"
+fi
+chmod -R go-rwx "${BACKUP_DIR}"
+
 # -------------------------------------------------------------------
 # 3. 設定ファイル一式のバックアップ
 # -------------------------------------------------------------------

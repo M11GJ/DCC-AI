@@ -10,6 +10,7 @@ import psycopg2
 
 JST = timezone(timedelta(hours=9), "JST")
 COUNTER = os.environ.get("TOKEN_USAGE_FILE", "/webui-data/dcc_ai_token_usage.json")
+RESET_LOG = os.environ.get("TOKEN_RESET_LOG_FILE", "/webui-data/dcc_ai_token_usage_resets.jsonl")
 
 
 def main():
@@ -23,6 +24,18 @@ def main():
     with open(COUNTER, encoding="utf-8") as f:
         file_values = {k: int(v) for k, v in (json.load(f).get(now.strftime("%Y-%m"), {})).items()}
 
+    reset_offsets = {}
+    try:
+        with open(RESET_LOG, encoding="utf-8") as f:
+            for line in f:
+                event = json.loads(line)
+                if event.get("month") != now.strftime("%Y-%m"):
+                    continue
+                for user_id, total in event.get("previous_usage", {}).items():
+                    reset_offsets[user_id] = reset_offsets.get(user_id, 0) + int(total)
+    except FileNotFoundError:
+        pass
+
     conn = psycopg2.connect(os.environ["DATABASE_URL"])
     try:
         with conn.cursor() as cur:
@@ -35,10 +48,16 @@ def main():
     finally:
         conn.close()
 
-    users = set(file_values) | set(db_values)
-    diffs = {user: file_values.get(user, 0) - db_values.get(user, 0) for user in users}
+    users = set(file_values) | set(reset_offsets) | set(db_values)
+    accounted_values = {
+        user: file_values.get(user, 0) + reset_offsets.get(user, 0) for user in users
+    }
+    diffs = {user: accounted_values.get(user, 0) - db_values.get(user, 0) for user in users}
     print(f"month={now.strftime('%Y-%m')} users={len(users)}")
-    print(f"file_total={sum(file_values.values())} db_total={sum(db_values.values())}")
+    print(
+        f"active_limit_total={sum(file_values.values())} "
+        f"reset_offset_total={sum(reset_offsets.values())} db_total={sum(db_values.values())}"
+    )
     print(f"mismatches={sum(value != 0 for value in diffs.values())} max_abs_diff={max(map(abs, diffs.values()), default=0)}")
     if any(diffs.values()):
         raise SystemExit(1)
@@ -46,4 +65,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
