@@ -13,8 +13,8 @@
 | `docker-compose.yml` | コンテナ定義（open-webui / litellm / cloudflared / ollama） |
 | `Dockerfile` | ブランディング＋env.pyパッチ入りカスタムビルド |
 | `open-webui.env` | Open WebUI 設定（認証含む・秘密情報あり） |
-| `.env` | APIキー各種（秘密情報）。Geminiキーの増減はここ |
-| `litellm/config.yaml` | モデルルーティング（マーカー内は自動管理） |
+| `.env` | APIキー各種（秘密情報）。停止中のGeminiキーも将来の復活用に保持 |
+| `litellm/config.yaml` | モデルルーティング（Geminiブロックは現在コメントアウト） |
 | `scripts/` | 自動運用スクリプト |
 | `branding/` | ロゴ・ファビコン・ログイン画面の注意書き |
 | `backups/` | 自動バックアップ（git管理外） |
@@ -40,8 +40,7 @@ cd /opt/dccai && docker compose logs -f open-webui
 # バックアップ手動実行
 bash /opt/dccai/scripts/backup.sh
 
-# Geminiキー死活確認
-python3 /opt/dccai/scripts/gemini-key-health.py
+# Geminiは現在一時停止中。gemini-key-health.pyは再有効化するまで実行しない
 ```
 
 ---
@@ -49,7 +48,7 @@ python3 /opt/dccai/scripts/gemini-key-health.py
 ## 重要：触れてはいけないもの
 
 1. `open-webui.env` の `ENABLE_OAUTH_ROLE_MANAGEMENT=false` — 変えるとロールがリセット
-2. `litellm/config.yaml` の `GEMINI_LOW_START〜END` マーカー内 — スクリプトが自動管理
+2. Geminiを復活させる場合は、`litellm/config.yaml`、`docker-compose.yml`、fallbacksを同時に戻してからヘルスチェックを再開する
 3. Pipeのモデルid変更時は `model` テーブルと `access_grant` を必ず更新
 
 詳細は HANDOFF.md §3「地雷」を参照。

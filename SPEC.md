@@ -15,7 +15,7 @@ DCC(デジタルクリエイターズコミュニティ)部員専用AIチャッ�
 | 公開URL(チャットUI) | https://ai.shu-dcc.net |
 | 公開URL(使用量ページ) | https://usage.shu-dcc.net |
 | 公開URL(Responses API) | https://responses.shu-dcc.net |
-| 提供モデル | High(DeepSeek V4 Flash) / Low(DeepSeek V4 Pro) / Code(GLM-5.2) の3系統、各系統に自動フォールバック先あり |
+| 提供モデル | High(DeepSeek V4 Flash Vision Exp / max) / Low(同 / high) / Code(DeepSeek V4 Flash 0731 / max) の3系統。公開モデルIDは従来どおり固定 |
 | ホスト | `ssh gunk@100.100.252.10`(通称n200、Linux実機。sudoパスワードレス、sshd非稼働でTailscale SSHのみ) |
 | アプリ本体 | `/opt/dccai`(git管理、root所有、GitHub remote: `github-dccai:M11GJ/DCC-AI.git`) |
 
@@ -26,7 +26,7 @@ DCC(デジタルクリエイターズコミュニティ)部員専用AIチャッ�
 ### 2.1 ホスト履歴
 1. omen17(2026-07-19構築時) → 2. desktop-1f999hf(dcc05さん私物WSL2機、2026-07-20) → 3. **n200(現行、2026-07-25頃)**
 
-旧ホストのうち`desktop-1f999hf`(Tailscale IP `100.80.194.51`)は**今も現役**で、GPU(RTX 4060)提供元として`dccai_pipe.py`の`OLLAMA_BASE_URL`が向いている(画像キャプションのフォールバック用)。omen17は生死未確認。
+旧ホストのうち`desktop-1f999hf`(Tailscale IP `100.80.194.51`)は**今も現役**。`dccai_pipe.py`に旧画像キャプション用の`OLLAMA_BASE_URL`設定は残るが、High/Lowがネイティブマルチモーダル化したため通常経路では使用しない。omen17は生死未確認。
 
 ### 2.2 n200のコンテナ構成(2026-08-21確認、8コンテナ全て稼働中・再起動回数0)
 
@@ -65,17 +65,17 @@ Cloudflare API tokenは無く、Public Hostnameの追加はダッシュボード
 
 | 系統 | 1st (litellm model_name) | 実体 | フォールバック順 |
 |---|---|---|---|
-| High | `dccai-high` | `deepseek/deepseek-v4-flash`(0731版、公式ベンチマークでv4-proより高性能) | `dccai-high-legacy`(Cerebras llama-3.3-70b → DeepSeek-V3 featherless) → `dccai-low` → `dccai-low-legacy` → `dccai-backup-low` |
-| Low | `dccai-low` | `deepseek/deepseek-v4-pro` | `dccai-low-legacy`(Gemini 3.1-flash-lite ×4キーをラウンドロビン、`gemini-key-health.py`が本来自動管理 ※**2026-08-21現在この自動管理は停止中、11節参照**) → `dccai-backup-low` |
-| Code | `dccai-code` | `openai/zai-org/GLM-5.2`(Featherless) | `dccai-high` |
-
-**注意**: High/Lowの「名前」と「実際のグレード」が逆転している(2026-08-01のベンチマーク結果を受けた変更)。`model_info.id`ラベルで実体を確認できる。
+| High | `dccai-high` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: max` | `dccai-high-legacy`(Cerebras llama-3.3-70b / DeepSeek-V3 featherless) → `dccai-low` → `dccai-backup-low` |
+| Low | `dccai-low` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: high` | `dccai-backup-low` |
+| Code | `dccai-code` | `deepseek/deepseek-v4-flash`(0731版) / `reasoning_effort: max` | `dccai-high` |
 
 DeepSeek V4系は既定でreasoning(思考過程)を出力するため、`max_tokens`が小さいと本文前に打ち切られる。
 
+Vision Experimentalは、現行LiteLLMのDeepSeek専用adapter経由だと未知モデルとしてtext-only扱いされ画像部分が除去されるため、High/Lowのみ`openai/` provider + `api_base: https://api.deepseek.com`で公式OpenAI互換APIへ中継する。`reasoning_effort`は`allowed_openai_params`、`thinking`は`extra_body`で明示的に通す。これによりLiteLLMの認証・使用量記録・fallbackを維持しつつ画像とeffort指定をそのまま送れる。
+
 Open WebUI上の公開モデルID(Pipe経由):`dccai.dccai-high-vision` / `dccai.dccai-low-vision` / `dccai.dccai-code`
 
-Geminiキーは`.env`に`GEMINI_API_KEY_1`〜`_5`の**5本**存在するが、`gemini-key-health.py`の最終稼働時(2026-07-20)時点で`_5`のみ不健全と判定され`config.yaml`からは除外済み(現在も4本構成)。以降ヘルスチェックが回っていないため、**この状態が今も正しいかは未検証**。
+Geminiキーは将来復活できるよう`.env`に`GEMINI_API_KEY_1`〜`_5`の**5本**を保持しているが、現在は`config.yaml`のモデル定義と`docker-compose.yml`の環境変数受け渡しをコメントアウトし、fallbackからも外している。`gemini-key-health.py`は残置しているが、自動管理マーカーを`GEMINI_DISABLED_*`へ変更してあるため構成を書き換えない。
 
 ---
 
@@ -84,12 +84,12 @@ Geminiキーは`.env`に`GEMINI_API_KEY_1`〜`_5`の**5本**存在するが、`g
 Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下のポリシーを一元的に適用する:
 
 - **モデル選択**: 公開model_idの末尾サフィックス("high"/"low"/"code")で内部litellmモデル名へ変換
-- **同時実行制御**: グループ別セマフォ(`_STATE_BY_GROUP`)。High/Lowは`MAX_CONCURRENCY`(既定3)、CodeはFeatherlessの同時接続制約が厳しいため`CODE_MAX_CONCURRENCY`(既定1)で別枠管理
+- **同時実行制御**: グループ別セマフォ(`_STATE_BY_GROUP`)。High/Lowは`MAX_CONCURRENCY`(既定3)、Codeは`CODE_MAX_CONCURRENCY`(既定3)で別枠管理
 - **High日次上限**: `HIGH_DAILY_LIMIT`(既定20回/日)、`USAGE_FILE`にflock付きread-modify-writeで記録
 - **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定
   - WebUI呼び出しとAPI呼び出しの区別は`__metadata__.chat_id`の有無で判定(`is_api_call`)
   - litellm側の集計用`user`フィールドも`<user_id>:api`(API)/`<user_id>`(WebUI)で分離
-- **画像処理**: Highは画像をまずGemini(`VISION_UPSTREAM`=`dccai-low-legacy`)に投げて説明文化しテキストとして本モデルに渡す。失敗時はローカルOllama(`desktop-1f999hf`のGPU)にフォールバック。Lowは画像添付時のみ`VISION_UPSTREAM`に直接ネイティブマルチモーダルで送る(dccai-lowの実体がDeepSeek=画像非対応のため)
+- **画像処理**: High/Lowはどちらもネイティブマルチモーダルモデルのため、画像を`image_url`形式のまま各モデルへ直接渡す。画像を説明文へ変換するGemini/Ollamaの中間処理は使用しない。画像非対応のCodeへ画像が送られた場合のみ`VISION_UPSTREAM`(既定`dccai-high`)へ転送する
 - **ストリーミング**: `stream_options.include_usage`を要求し、SSE末尾のusageチャンクからトークン数を取得(Open WebUI管理者ダッシュボードのトークン表示・月間カウンタ更新の両方に必要)
 
 反映方法: `dccai_pipe.py`を編集後、`bash /opt/dccai/scripts/sync_pipe_to_db.sh`でOpen WebUIのSQLite(`function`テーブル)へ書き込み+open-webui再起動が必要(ファイルを置くだけでは反映されない)。
@@ -173,14 +173,14 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 このドキュメント作成にあたりn200へ実際にSSHし、`docker ps`/`docker stats`/`git log`/`git status`/`systemctl list-timers`/`config.yaml`/`docker-compose.yml`/各スクリプトの中身を直接確認した。以下は旧版(2026-08-01)からの実質的な変化、または旧版に記載が無かった発見。
 
-### 11.1 【要対応候補】自動化ジョブが2つ、サイレントに停止している
+### 11.1 自動化ジョブの現状
 
-`/opt/dccai/scripts`には以下2つの「定期実行前提」のスクリプトが存在するが、**n200上には対応するsystemdタイマーが一切登録されていない**(`systemctl list-timers --all`で確認、crontabもuser/root共に空)。ログの最終エントリはどちらも**2026-07-20**(omen17 or desktop-1f999hf時代)で止まっており、**旧ホストからn200への移行時に引き継がれなかったまま1ヶ月放置されている**:
+`/opt/dccai/scripts`には以下2つのスクリプトが残っているが、n200上には対応するsystemdタイマーが登録されていない:
 
 1. **`discord-knowledge-sync.py`**(+ラッパー`discord-knowledge-sync.sh`): Discordの指定チャンネルのメッセージをOpen WebUIのKnowledge「DCC Discord」に同期し、RAGとしてモデルに参照させる機能。スクリプト内コメントでは「systemdの`dccai-discord-sync.timer`から30分ごとに呼ばれる」想定だが、そのタイマー自体が現ホストに存在しない。**つまりDiscordのナレッジは2026-07-20時点の内容で1ヶ月以上更新されていない可能性が高い**
-2. **`gemini-key-health.py`**: Geminiキーの生死を自動判定し、死んだキーを`config.yaml`から自動的に除外/復活させる仕組み。同様にタイマーが存在せず、最終実行は2026-07-20。現在`config.yaml`は最終実行時点の判定(`GEMINI_API_KEY_5`のみ除外、1〜4使用)のまま固定されている。**もし1〜4のいずれかがその後死んでいても自動検知されない**(Low-legacyのフォールバック層なので実害はhigh/low両方が失敗した場合のみだが、気づきにくい)
+2. **`gemini-key-health.py`**: Geminiプールの一時廃止に伴い、意図的に停止状態を維持する。キーとスクリプトは将来の復活用に残すが、`config.yaml`の定義、Composeのキー受け渡し、fallback参照は無効化済み。
 
-対応候補: 両スクリプトの動作を確認した上で、n200用に`.timer`/`.service`ユニットを作成して再登録する(desktop-1f999hf時代の`dccai-oom-protect.timer`等と同様のパターンを踏襲できる)。あるいは意図的に廃止するなら、スクリプトとログファイルを整理する。
+Discordナレッジ同期の扱いは別途ユーザー指示待ち。Geminiヘルスチェックは再登録しない。
 
 ### 11.2 【要検討】Tailscale SSHがOOM保護されていない
 
@@ -199,13 +199,13 @@ n200は**sshd非稼働でTailscale SSHが唯一の遠隔操作手段**なので�
 ### 11.4 軽微なドリフト(設定値の変化)
 
 - `litellm`の`mem_limit`が旧メモリ記載の`1536m`から**`2048m`に増量**されていた(いつ・誰が変更したか不明、コミット履歴からは特定できず。おそらくメモリ不足での実地対応)
-- `.env`のGeminiキーは**5本**(`GEMINI_API_KEY_1`〜`_5`)登録されているが、現在の`config.yaml`は4本構成(11.1参照)
+- `.env`のGeminiキーは**5本**(`GEMINI_API_KEY_1`〜`_5`)保持しているが、モデル定義・環境変数受け渡し・fallbackはいずれも一時停止中(11.1参照)
 - 直近の未文書化コミット3件: `c6a4060`(SPEC.md新規作成)、`66e8af0`(Open WebUI v0.11.0へアップグレード)、`0c1d77c`(Responses APIのツール呼び出し正規化+DSML復元、テストファイル追加)
 
 ### 11.5 git remoteとの乖離
 
-`/opt/dccai`はGitHub(`github-dccai:M11GJ/DCC-AI.git`)をoriginに持つが、**ローカルがorigin/masterより1コミット先行**(`0c1d77c` = Responses API改修コミットが未push)。**GitHubからcloneして作業を引き継ぐ場合、この最新コミットが欠落している点に注意**。push可否はユーザー確認の上で対応すること。
+`/opt/dccai`はGitHub(`github-dccai:M11GJ/DCC-AI.git`)をoriginに持つが、今回のモデル更新コミット後は**ローカルがorigin/masterより3コミット先行**する。Responses API改修、実機再調査SPEC更新、今回のモデル／マルチモーダル更新が未push。**GitHubからcloneして作業を引き継ぐ場合、これらが欠落する点に注意**。push可否はユーザー確認の上で対応すること。
 
 ---
 
-*本ドキュメントは2026-08-21、Claude(Sonnet 5)がn200へ直接SSHし実機確認の上で作成・更新した。次回引き継ぎ時は本節(11)の内容を消化した上で、新たな差分があれば追記・更新すること。*
+*本ドキュメントは2026-08-21、Claude(Sonnet 5)がn200へ直接SSHし実機確認の上で作成し、同日Codexがモデル／マルチモーダル更新後の状態を追記した。次回引き継ぎ時は本節(11)の内容を消化した上で、新たな差分があれば追記・更新すること。*

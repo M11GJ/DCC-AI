@@ -3,7 +3,7 @@ title: DCC AI
 author: DCC
 version: 1.0.0
 license: MIT
-description: DCC部員向け DCC AI High/Low/Code。順番待ちUI・High日次上限つきで LiteLLM 経由 featherless 等に中継。
+description: DCC部員向け DCC AI High/Low/Code。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
 requirements: httpx
 """
 import asyncio
@@ -13,6 +13,7 @@ import os
 import re
 import base64
 import glob
+import mimetypes
 from datetime import date
 from typing import Optional, Callable, Awaitable, Any
 
@@ -22,8 +23,7 @@ from pydantic import BaseModel, Field
 # --- プロセス内で共有する同時実行の状態（順番待ち表示のため自前カウント） ---
 # グループ(モデル系統)ごとに別々のセマフォを持つ。上限が違うグループを同じ
 # セマフォで管理すると cap 変更のたびに作り直されて壊れるため分離している。
-# 例: Featherless上のGLM-5.2(dccai-code)はプラン側の同時実行上限が
-# High/Lowより大幅に低いため、専用の小さいcapで先にこちら側で順番待ちさせる。
+# モデル系統ごとのcapは独立して変更できる。
 _STATE_BY_GROUP = {}
 
 
@@ -51,21 +51,19 @@ class Pipe:
             default="dccai-low", description="LiteLLM 側の Low モデル名"
         )
         CODE_UPSTREAM: str = Field(
-            default="dccai-code", description="LiteLLM 側の Code モデル名(GLM-5.2, Featherless)"
+            default="dccai-code", description="LiteLLM 側の Code モデル名"
         )
         VISION_UPSTREAM: str = Field(
-            default="dccai-low-legacy",
-            description="画像のネイティブ解析に使うLiteLLM側モデル名（マルチモーダル対応必須。dccai-lowはDeepSeek優先になったため、Geminiプール(dccai-low-legacy)を直接指定する）",
+            default="dccai-high",
+            description="画像非対応モデルに画像が送られた場合の転送先（マルチモーダル対応必須）",
         )
         MAX_CONCURRENCY: int = Field(
             default=3,
             description="High/Lowの同時生成上限(DeepSeek公式APIが主経路のため実質rpm制限のみが効く)",
         )
         CODE_MAX_CONCURRENCY: int = Field(
-            default=1,
-            description="Codeモデル(GLM-5.2, Featherless)専用の同時生成上限。"
-            "Featherless側のプラン同時実行コストが高く(1リクエストで枠を使い切る)、"
-            "超えると429で即エラーになるため、High/Lowとは別枠でここで先に順番待ちさせる",
+            default=3,
+            description="Codeモデル専用の同時生成上限",
         )
         MAX_QUEUE_WAIT: int = Field(
             default=180,
@@ -97,8 +95,7 @@ class Pipe:
         )
         REQUEST_TIMEOUT: int = Field(
             default=1200,
-            description="API タイムアウト秒。GLM-5.2(Code)は長い推論で数百秒かかることが"
-            "実測されている(最大845秒観測)ため、litellm側のrequest_timeoutより長めに余裕を持たせている",
+            description="API タイムアウト秒。max effortの長い推論に備えて余裕を持たせる",
         )
         OLLAMA_BASE_URL: str = Field(
             default="http://100.80.194.51:11434",
@@ -303,22 +300,24 @@ class Pipe:
         ):
             messages = [{"role": "system", "content": self.valves.SYSTEM_PROMPT}] + messages
 
-        # ---- 画像インターセプト (ローカルOllamaでテキスト化) ----
+        # ---- 画像入力 ----
+        # High/Lowはネイティブマルチモーダルモデルなので、画像を説明文へ変換せず
+        # OpenAI互換のimage_url形式のまま上流へ渡す。画像非対応のCodeへ画像が来た
+        # 場合だけ、VISION_UPSTREAM (High)へリクエスト全体を転送する。
         processed_messages = []
-        low_has_image = False
+        code_has_image = False
         for msg in messages:
             content = msg.get("content", "")
             
             text_parts = []
-            images_to_process = []
+            image_urls = []
             
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "image_url":
                         url = item.get("image_url", {}).get("url", "")
-                        if url.startswith("data:image"):
-                            base64_data = url.split(",", 1)[-1]
-                            images_to_process.append(base64_data)
+                        if url:
+                            image_urls.append(url)
                     elif isinstance(item, dict) and item.get("type") == "text":
                         text_parts.append(item.get("text", ""))
                     elif isinstance(item, str):
@@ -337,74 +336,30 @@ class Pipe:
                         try:
                             with open(matches[0], "rb") as f:
                                 b64 = base64.b64encode(f.read()).decode("utf-8")
-                                images_to_process.append(b64)
+                                mime = mimetypes.guess_type(matches[0])[0] or "image/jpeg"
+                                image_urls.append(f"data:{mime};base64,{b64}")
                         except Exception:
                             pass
                 # LLMが混乱しないようXMLブロックを削除
                 combined_text = re.sub(r'<attached_files>.*?</attached_files>', '', combined_text, flags=re.DOTALL)
             
-            if images_to_process:
-                if is_high:
-                    await status("👁️ 画像を処理しています...", False)
-                    vision_text = ""
-                    try:
-                        async with httpx.AsyncClient(timeout=120) as client:
-                            # 1. まず Gemini (VISION_UPSTREAM) に投げて画像解析を試みる
-                            gemini_content = [{"type": "text", "text": self.valves.VISION_PROMPT}]
-                            for b64 in images_to_process:
-                                gemini_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-
-                            gemini_payload = {
-                                "model": self.valves.VISION_UPSTREAM,
-                                "messages": [{"role": "user", "content": gemini_content}],
-                                "stream": False
-                            }
-                            resp = await client.post(
-                                f"{self.valves.LITELLM_BASE_URL}/chat/completions",
-                                json=gemini_payload,
-                                headers=self._headers()
-                            )
-                            if resp.status_code == 200:
-                                vision_text = resp.json()["choices"][0]["message"]["content"]
-                            else:
-                                raise Exception(f"Gemini API returned {resp.status_code}")
-                    except Exception as e:
-                        # 2. 失敗したらローカルOllamaへ予備（フォールバック）として投げる
-                        await status("⚠️ 予備の画像処理システムへ切り替えています...", False)
-                        try:
-                            async with httpx.AsyncClient(timeout=120) as client:
-                                ollama_payload = {
-                                    "model": self.valves.VISION_MODEL,
-                                    "prompt": self.valves.VISION_PROMPT,
-                                    "images": images_to_process,
-                                    "stream": False
-                                }
-                                resp = await client.post(f"{self.valves.OLLAMA_BASE_URL}/api/generate", json=ollama_payload)
-                                if resp.status_code == 200:
-                                    vision_text = resp.json().get("response", "")
-                                else:
-                                    return f"🔧 【ローカルOllama エラー】\n画像のテキスト化中にエラーが返されました。\nステータス: {resp.status_code}\n内容: {resp.text}"
-                        except Exception as e2:
-                            return f"🔧 【画像処理エラー】\nGeminiおよびローカルOllamaの両方で画像解析に失敗しました。\n詳細: {e2}"
-                    
-                    combined_text += f"\n\n[添付画像の説明: {vision_text}]\n"
-                    processed_messages.append({**msg, "content": combined_text})
-                else:
-                    # Low側は dccai-low が必ずしもマルチモーダル対応とは限らない(DeepSeek優先のため)
-                    # ネイティブ対応の VISION_UPSTREAM (Gemini) へ直接送る
-                    low_has_image = True
-                    content_list = [{"type": "text", "text": combined_text}]
-                    for b64 in images_to_process:
-                        content_list.append({
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                        })
-                    processed_messages.append({**msg, "content": content_list})
+            if image_urls:
+                content_list = []
+                if combined_text:
+                    content_list.append({"type": "text", "text": combined_text})
+                for url in image_urls:
+                    content_list.append({
+                        "type": "image_url",
+                        "image_url": {"url": url},
+                    })
+                processed_messages.append({**msg, "content": content_list})
+                if is_code:
+                    code_has_image = True
             else:
                 processed_messages.append({**msg, "content": combined_text})
 
         messages = processed_messages
-        if not is_high and low_has_image:
+        if code_has_image:
             upstream = self.valves.VISION_UPSTREAM
 
         payload = {
@@ -422,7 +377,7 @@ class Pipe:
                 payload[k] = body[k]
 
         # ---- 同時実行セマフォ＋順番待ちの見える化（④） ----
-        # グループ(default=High/Low, code=GLM-5.2)ごとに別セマフォ・別カウンタを使う
+        # グループ(default=High/Low, code=Code)ごとに別セマフォ・別カウンタを使う
         state = _get_group_state(concurrency_group, concurrency_cap)
         sem = state["sem"]
         must_wait = state["active"] >= concurrency_cap

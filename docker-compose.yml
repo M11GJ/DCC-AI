@@ -24,11 +24,12 @@ services:
       - ./litellm/config.yaml:/app/config.yaml:ro
     environment:
       - FEATHERLESS_API_KEY=${FEATHERLESS_API_KEY}
-      - GEMINI_API_KEY_1=${GEMINI_API_KEY_1}
-      - GEMINI_API_KEY_2=${GEMINI_API_KEY_2}
-      - GEMINI_API_KEY_3=${GEMINI_API_KEY_3}
-      - GEMINI_API_KEY_4=${GEMINI_API_KEY_4}
-      - GEMINI_API_KEY_5=${GEMINI_API_KEY_5}
+      # Geminiプールは一時停止中。キーは.envに保持し、復活時に以下をコメント解除する。
+      # - GEMINI_API_KEY_1=${GEMINI_API_KEY_1}
+      # - GEMINI_API_KEY_2=${GEMINI_API_KEY_2}
+      # - GEMINI_API_KEY_3=${GEMINI_API_KEY_3}
+      # - GEMINI_API_KEY_4=${GEMINI_API_KEY_4}
+      # - GEMINI_API_KEY_5=${GEMINI_API_KEY_5}
       - CEREBRAS_API_KEY=${CEREBRAS_API_KEY}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
@@ -134,7 +135,7 @@ services:
       - TOKEN_USAGE_FILE=/webui-data/dcc_ai_token_usage.json
       # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を維持すること
       - MONTHLY_TOKEN_LIMIT=10000000
-      - CODE_MAX_CONCURRENCY=1
+      - CODE_MAX_CONCURRENCY=3
     ports:
       - "3003:3003"
     mem_limit: 256m
