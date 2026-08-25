@@ -74,6 +74,24 @@ model_list:
       rpm: 30
     model_info: { id: "DeepSeek V4 Flash Vision Exp Code (Max Effort)", input_cost_per_token: 0, output_cost_per_token: 0 }
 
+  # ---- Local 80B：Qwen3 Coder Next Abliterated / 64K context ----
+  # Tailscale内のGPUサーバーais1-ser2へ接続する。Open WebUIのPipeからのみ公開し、
+  # Chat Completions API / Responses APIからはPipe・Gateway側で拒否する。
+  - model_name: dccai-local-80b
+    litellm_params:
+      model: ollama_chat/huihui_ai/qwen3-coder-next-abliterated:latest
+      api_base: http://100.68.87.103:11434
+      num_ctx: 65536
+      keep_alive: 5m
+    model_info:
+      id: "Qwen3 Coder Next Abliterated 79.7B Q4_K_M (Local 64K)"
+      mode: chat
+      supports_function_calling: true
+      supports_vision: false
+      max_input_tokens: 65536
+      input_cost_per_token: 0
+      output_cost_per_token: 0
+
 litellm_settings:
   num_retries: 2
   request_timeout: 1200

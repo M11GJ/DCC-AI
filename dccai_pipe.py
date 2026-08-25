@@ -1,9 +1,9 @@
 """
 title: DCC AI
 author: DCC
-version: 1.0.0
+version: 1.1.0
 license: MIT
-description: DCC部員向け DCC AI High/Low/Code。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
+description: DCC部員向け DCC AI High/Low/Code/Local 80B。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
 requirements: httpx
 """
 import asyncio
@@ -75,6 +75,9 @@ class Pipe:
         CODE_UPSTREAM: str = Field(
             default="dccai-code", description="LiteLLM 側の Code モデル名"
         )
+        LOCAL_UPSTREAM: str = Field(
+            default="dccai-local-80b", description="LiteLLM 側の Local 80B モデル名"
+        )
         MAX_CONCURRENCY: int = Field(
             default=3,
             description="High/Lowの同時生成上限(DeepSeek公式APIが主経路のため実質rpm制限のみが効く)",
@@ -82,6 +85,10 @@ class Pipe:
         CODE_MAX_CONCURRENCY: int = Field(
             default=3,
             description="Codeモデル専用の同時生成上限",
+        )
+        LOCAL_MAX_CONCURRENCY: int = Field(
+            default=1,
+            description="Local 80Bモデル専用の同時生成上限（Ollama qwen3nextは単一推論）",
         )
         MAX_QUEUE_WAIT: int = Field(
             default=180,
@@ -131,7 +138,7 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
 
-    # Open WebUI に3つのモデルとして出す
+    # Open WebUI に4つのモデルとして出す
     def pipes(self):
         return [
             {
@@ -161,6 +168,23 @@ class Pipe:
                     "vision": True,
                     "capabilities": {
                         "citations": False
+                    }
+                }
+            },
+            {
+                "id": "dccai-local-80b",
+                "name": "DCC AI Local 80B",
+                "meta": {
+                    "vision": False,
+                    "knowledge": [],
+                    "capabilities": {
+                        "vision": False,
+                        "citations": False,
+                        "file_context": True,
+                        "file_upload": True,
+                        "web_search": True,
+                        "builtin_tools": True,
+                        "status_updates": True
                     }
                 }
             },
@@ -276,8 +300,46 @@ class Pipe:
         is_api_call = not (__metadata__ or {}).get("chat_id")
         litellm_user_id = f"{user_id}:api" if is_api_call else user_id
 
-        # ---- 月間トークン上限チェック（API経由のみ対象、High/Low/Code合算、モデル選択より前に判定） ----
-        # WebUI経由のチャットはこの上限の対象外(部員の通常利用を妨げないため)。
+        # 選択モデル。任意prefixを許すsuffix判定は行わず、公開中の完全なIDだけを許可する。
+        # Open WebUI内部名も、同期・テスト用途のため明示的にallowlistへ含める。
+        raw_model = str(body.get("model", "")).strip().lower()
+        model_aliases = {
+            "dccai.dccai-local-80b": "local",
+            "dccai-local-80b": "local",
+            "dccai.dccai-code": "code",
+            "dccai-code": "code",
+            "dccai.dccai-high-vision": "high",
+            "dccai-high-vision": "high",
+            "dccai-high": "high",
+            "dccai.dccai-low-vision": "low",
+            "dccai-low-vision": "low",
+            "dccai-low": "low",
+        }
+        selected_model = model_aliases.get(raw_model)
+
+        is_high = False
+        is_code = False
+        is_local = False
+        if selected_model == "local":
+            upstream = self.valves.LOCAL_UPSTREAM
+            is_local = True
+        elif selected_model == "code":
+            upstream = self.valves.CODE_UPSTREAM
+            is_code = True
+        elif selected_model == "high":
+            upstream = self.valves.HIGH_UPSTREAM
+            is_high = True
+        elif selected_model == "low":
+            upstream = self.valves.LOW_UPSTREAM
+        else:
+            return "このモデルIDはDCC AIで利用できません。"
+
+        # Local 80BはOpen WebUIのチャット画面限定。外部Chat APIからは上流へ送らない。
+        if is_local and is_api_call:
+            return "DCC AI Local 80Bは現在、DCC AIのWebチャット画面からのみ利用できます。"
+
+        # ---- 月間トークン上限チェック（API経由のみ対象、High/Low/Code合算） ----
+        # WebUI経由のチャットとWeb限定Local 80Bはこの上限の対象外。
         if is_api_call and self.valves.MONTHLY_TOKEN_LIMIT > 0:
             if self._month_tokens_used(user_id) >= self.valves.MONTHLY_TOKEN_LIMIT:
                 return (
@@ -285,23 +347,15 @@ class Pipe:
                     "来月また使えます。"
                 )
 
-        # 選択モデル（"dccai.dccai-high-vision" のように prefix が付くので末尾で判定）
-        raw_model = str(body.get("model", ""))
-        model_suffix = raw_model.rsplit(".", 1)[-1].lower()
-        
-        is_high = False
-        is_code = False
-        if "code" in model_suffix:
-            upstream = self.valves.CODE_UPSTREAM
-            is_code = True
-        elif "high" in model_suffix:
-            upstream = self.valves.HIGH_UPSTREAM
-            is_high = True
+        if is_local:
+            concurrency_group = "local"
+            concurrency_cap = self.valves.LOCAL_MAX_CONCURRENCY
+        elif is_code:
+            concurrency_group = "code"
+            concurrency_cap = self.valves.CODE_MAX_CONCURRENCY
         else:
-            upstream = self.valves.LOW_UPSTREAM
-
-        concurrency_group = "code" if is_code else "default"
-        concurrency_cap = self.valves.CODE_MAX_CONCURRENCY if is_code else self.valves.MAX_CONCURRENCY
+            concurrency_group = "default"
+            concurrency_cap = self.valves.MAX_CONCURRENCY
 
         # ---- High の 1 日上限チェック ----
         if is_high and self.valves.HIGH_DAILY_LIMIT > 0:
@@ -319,9 +373,10 @@ class Pipe:
             messages = [{"role": "system", "content": self.valves.SYSTEM_PROMPT}] + messages
 
         # ---- 画像入力 ----
-        # High/Low/Codeはすべてネイティブマルチモーダルモデルなので、画像を
-        # 説明文へ変換せずOpenAI互換のimage_url形式のまま選択モデルへ渡す。
+        # High/Low/Codeはネイティブマルチモーダルなので画像をそのまま渡す。
+        # Local 80Bはtext-onlyのため、画像が含まれる場合は上流へ送らず案内する。
         processed_messages = []
+        has_image_input = False
         for msg in messages:
             content = msg.get("content", "")
             
@@ -360,6 +415,7 @@ class Pipe:
                 combined_text = re.sub(r'<attached_files>.*?</attached_files>', '', combined_text, flags=re.DOTALL)
             
             if image_urls:
+                has_image_input = True
                 content_list = []
                 if combined_text:
                     content_list.append({"type": "text", "text": combined_text})
@@ -373,6 +429,8 @@ class Pipe:
                 processed_messages.append({**msg, "content": combined_text})
 
         messages = processed_messages
+        if is_local and has_image_input:
+            return "DCC AI Local 80Bは画像入力に対応していません。テキストで送信してください。"
         payload = {
             "model": upstream,
             "messages": messages,
@@ -432,7 +490,7 @@ class Pipe:
                 ]
 
         # ---- 同時実行セマフォ＋順番待ちの見える化（④） ----
-        # グループ(default=High/Low, code=Code)ごとに別セマフォ・別カウンタを使う
+        # グループ(default=High/Low, code=Code, local=Local 80B)ごとに別セマフォ・別カウンタを使う
         state = _get_group_state(concurrency_group, concurrency_cap)
         sem = state["sem"]
         must_wait = state["active"] >= concurrency_cap

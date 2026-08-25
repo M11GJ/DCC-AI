@@ -8,6 +8,7 @@ import time
 
 DB_PATH = "/app/backend/data/webui.db"
 STALE_MODEL_IDS = ("dccai.dccai-high", "dccai.dccai-low")
+LOCAL_MODEL_ID = "dccai.dccai-local-80b"
 
 RAG_TEMPLATE = """### Task:
 Answer the user's query using the retrieved context below.
@@ -63,6 +64,19 @@ def main():
             (json.dumps(meta, ensure_ascii=False), now, "dccai.dccai-code"),
         )
 
+        row = conn.execute(
+            "SELECT meta FROM model WHERE id = ?", (LOCAL_MODEL_ID,)
+        ).fetchone()
+        if row:
+            local_meta = json.loads(row[0]) if row[0] else {}
+            local_meta["knowledge"] = []
+            local_capabilities = local_meta.setdefault("capabilities", {})
+            local_capabilities["vision"] = False
+            conn.execute(
+                "UPDATE model SET meta = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(local_meta, ensure_ascii=False), now, LOCAL_MODEL_ID),
+            )
+
         # vision接尾辞なしの旧High/Lowは同名で表示され、ナレッジ設定も異なるため削除する。
         placeholders = ",".join("?" for _ in STALE_MODEL_IDS)
         conn.execute(
@@ -82,6 +96,11 @@ def main():
 
     print("Updated rag.template with explicit QUERY and web-search awareness")
     print("Confirmed dccai.dccai-code knowledge=[] and vision=true")
+    print("Confirmed Local 80B Pipe metadata knowledge=[] and vision=false")
+    if row:
+        print("Updated dccai.dccai-local-80b model-row metadata")
+    else:
+        print("Local 80B has no custom model row; Pipe metadata remains authoritative")
     print("Removed stale DCC AI High/Low model rows and access grants")
 
 

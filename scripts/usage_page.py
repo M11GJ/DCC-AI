@@ -313,9 +313,9 @@ def litellm_all_users_grouped():
     return per_user
 
 
-# litellmのmodel_groupを表示用の3系統(High/Low/Code)にまとめる。
+# litellmのmodel_groupを表示用の4系統(High/Low/Code/Local 80B)にまとめる。
 # フォールバック先(*-legacy, backup-low)は上位ティアに合算して表示する。
-MODEL_TIERS = ["High", "Low", "Code"]
+MODEL_TIERS = ["High", "Low", "Code", "Local 80B"]
 MODEL_TIER_MAP = {
     "dccai-high": "High",
     "dccai-high-legacy": "High",
@@ -323,6 +323,7 @@ MODEL_TIER_MAP = {
     "dccai-low-legacy": "Low",
     "dccai-backup-low": "Low",
     "dccai-code": "Code",
+    "dccai-local-80b": "Local 80B",
 }
 
 
@@ -400,6 +401,7 @@ THEME_CSS_BLOCK = """
     --series-high:    #2a78d6;
     --series-low:     #eb6834;
     --series-code:    #1baf7a;
+    --series-local:   #8b5cf6;
   }}
   @media (prefers-color-scheme: dark) {{
     :root:where(:not([data-theme="light"])) {{
@@ -414,6 +416,7 @@ THEME_CSS_BLOCK = """
       --series-high:    #3987e5;
       --series-low:     #d95926;
       --series-code:    #199e70;
+      --series-local:   #7c4dd8;
     }}
   }}
   :root[data-theme="dark"] {{
@@ -428,6 +431,7 @@ THEME_CSS_BLOCK = """
     --series-high:    #3987e5;
     --series-low:     #d95926;
     --series-code:    #199e70;
+    --series-local:   #7c4dd8;
   }}
   body {{ background: var(--page); color: var(--text-primary); margin: 0;
           font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif; }}
@@ -580,6 +584,7 @@ ADMIN_TEMPLATE = """<!doctype html>
   .seg-high {{ background: var(--series-high); }}
   .seg-low {{ background: var(--series-low); }}
   .seg-code {{ background: var(--series-code); }}
+  .seg-local {{ background: var(--series-local); }}
   .bar-total {{ width: 72px; flex: none; text-align: right; font-size: 0.82rem;
                 color: var(--text-secondary); font-variant-numeric: tabular-nums; }}
 
@@ -628,6 +633,7 @@ ADMIN_TEMPLATE = """<!doctype html>
       <div class="legend-item"><span class="legend-swatch" style="background:var(--series-high)"></span>High</div>
       <div class="legend-item"><span class="legend-swatch" style="background:var(--series-low)"></span>Low</div>
       <div class="legend-item"><span class="legend-swatch" style="background:var(--series-code)"></span>Code</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--series-local)"></span>Local 80B</div>
     </div>
     {model_bar_rows}
   </div>
@@ -635,7 +641,7 @@ ADMIN_TEMPLATE = """<!doctype html>
   <div class="card">
     <div class="muted" style="margin-bottom:8px;">モデル別(全期間累計)</div>
     <table>
-      <tr><th>ユーザー</th><th>High</th><th>Low</th><th>Code</th><th>合計</th></tr>
+      <tr><th>ユーザー</th><th>High</th><th>Low</th><th>Code</th><th>Local 80B</th><th>合計</th></tr>
       {model_table_rows}
     </table>
   </div>
@@ -889,9 +895,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             model_rows_data.sort(key=lambda r: -r[2])
             model_table_rows = "".join(
                 f"<tr><td>{label}</td><td>{tiers.get('High', 0):,}</td>"
-                f"<td>{tiers.get('Low', 0):,}</td><td>{tiers.get('Code', 0):,}</td><td>{total:,}</td></tr>"
+                f"<td>{tiers.get('Low', 0):,}</td><td>{tiers.get('Code', 0):,}</td>"
+                f"<td>{tiers.get('Local 80B', 0):,}</td><td>{total:,}</td></tr>"
                 for label, tiers, total in model_rows_data
-            ) or "<tr><td colspan=5>データなし</td></tr>"
+            ) or "<tr><td colspan=6>データなし</td></tr>"
 
             max_model_total = max((r[2] for r in model_rows_data), default=1)
 
@@ -904,6 +911,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ("high", "High", tiers.get("High", 0)),
                         ("low", "Low", tiers.get("Low", 0)),
                         ("code", "Code", tiers.get("Code", 0)),
+                        ("local", "Local 80B", tiers.get("Local 80B", 0)),
                     )
                     if val > 0
                 )
@@ -950,9 +958,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         for m, t in api_by_model.items():
             by_model[m] = by_model.get(m, 0) + t
 
+        display_by_model = {}
+        for model, tokens in by_model.items():
+            label = MODEL_TIER_MAP.get(model, model)
+            display_by_model[label] = display_by_model.get(label, 0) + tokens
+
         model_rows = "".join(
             f'<div class="row"><span>{m}</span><span>{t:,}</span></div>'
-            for m, t in sorted(by_model.items(), key=lambda x: -x[1])
+            for m, t in sorted(display_by_model.items(), key=lambda x: -x[1])
         ) or '<div class="muted">データなし</div>'
 
         admin_link = (

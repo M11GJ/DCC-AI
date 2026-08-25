@@ -1,6 +1,10 @@
 import copy
 import json
+import pathlib
+import sys
 import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import responses_gateway as gateway
 
@@ -18,6 +22,22 @@ FUNCTION = {
 
 
 class ResponsesGatewayTests(unittest.TestCase):
+    def test_model_resolution_uses_an_explicit_allowlist(self):
+        self.assertEqual(gateway.resolve_model("dccai.dccai-high-vision"), ("dccai-high", False))
+        self.assertEqual(gateway.resolve_model("dccai-low"), ("dccai-low", False))
+        self.assertEqual(gateway.resolve_model("dccai.dccai-code"), ("dccai-code", True))
+
+    def test_local_and_unknown_models_are_rejected(self):
+        for model in (
+            "dccai.dccai-local-80b",
+            "dccai-local-80b",
+            "unknown-model",
+            "evil.dccai-low",
+            "evil.dccai-code",
+        ):
+            with self.subTest(model=model), self.assertRaises(ValueError):
+                gateway.resolve_model(model)
+
     def test_nested_function_tool_is_flattened(self):
         payload = {
             "tools": [{"type": "function", "function": copy.deepcopy(FUNCTION)}],

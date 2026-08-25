@@ -10,7 +10,7 @@
 
 | パス | 内容 |
 |---|---|
-| `docker-compose.yml` | コンテナ定義（open-webui / litellm / cloudflared / ollama） |
+| `docker-compose.yml` | コンテナ定義（open-webui / litellm / cloudflaredほか。Ollamaは外部GPUサーバー） |
 | `Dockerfile` | ブランディング＋env.pyパッチ入りカスタムビルド |
 | `open-webui.env` | Open WebUI 設定（認証含む・秘密情報あり） |
 | `.env` | APIキー各種（秘密情報）。停止中のGeminiキーも将来の復活用に保持 |
@@ -42,7 +42,7 @@ bash /opt/dccai/scripts/backup.sh
 
 # Geminiは現在一時停止中。gemini-key-health.pyは再有効化するまで実行しない
 
-# Web検索/RAGテンプレートとCodeのナレッジ未接続設定をDBへ反映
+# Web検索/RAGテンプレートとCode/Localのナレッジ未接続設定をDBへ反映
 bash /opt/dccai/scripts/apply_open_webui_rag.sh
 ```
 

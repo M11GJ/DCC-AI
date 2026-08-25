@@ -110,8 +110,8 @@ services:
     restart: unless-stopped
 
   # ollama:
-  #   旧ホスト(desktop-1f999hf, RTX 4060)に残置。GPU無しのgunkでは実行しない
-  #   dccai_pipe.py の OLLAMA_BASE_URL を http://100.80.194.51:11434 に向けて利用
+  #   Local 80Bはais1-ser2上の外部OllamaへLiteLLMから直接接続する。
+  #   GPU無しのgunkではOllamaコンテナを実行しない。
 
   searxng:
     image: searxng/searxng:latest

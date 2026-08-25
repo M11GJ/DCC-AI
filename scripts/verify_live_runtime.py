@@ -67,7 +67,7 @@ def main():
     checks = []
 
     with httpx.Client(timeout=180) as client:
-        for model in ("dccai-high", "dccai-low", "dccai-code"):
+        for model in ("dccai-high", "dccai-low", "dccai-code", "dccai-local-80b"):
             response = client.post(
                 "http://litellm:4000/v1/chat/completions",
                 headers=internal_headers,
@@ -80,6 +80,77 @@ def main():
             response.raise_for_status()
             answer = response.json()["choices"][0]["message"].get("content") or ""
             checks.append((f"{model} text", bool(answer.strip()), answer[:80]))
+
+        response = client.post(
+            "http://litellm:4000/v1/chat/completions",
+            headers=internal_headers,
+            json={
+                "model": "dccai-local-80b",
+                "messages": [{"role": "user", "content": "東京の天気をツールで取得してください。"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "指定都市の天気を取得する",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+                "temperature": 0,
+                "max_tokens": 128,
+            },
+        )
+        response.raise_for_status()
+        local_message = response.json()["choices"][0]["message"]
+        checks.append(
+            (
+                "dccai-local-80b tools",
+                bool(local_message.get("tool_calls")),
+                json.dumps(local_message, ensure_ascii=False)[:500],
+            )
+        )
+
+        with client.stream(
+            "POST",
+            "http://litellm:4000/v1/chat/completions",
+            headers=internal_headers,
+            json={
+                "model": "dccai-local-80b",
+                "messages": [{"role": "user", "content": "Reply with exactly LOCAL_STREAM_OK."}],
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                "temperature": 0,
+                "max_tokens": 32,
+            },
+        ) as response:
+            response.raise_for_status()
+            local_stream_body = response.read().decode(errors="replace")
+        local_stream_text = []
+        local_stream_has_usage = False
+        for line in local_stream_body.splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            try:
+                chunk = json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("usage", {}).get("total_tokens") is not None:
+                local_stream_has_usage = True
+            for choice in chunk.get("choices") or []:
+                local_stream_text.append(choice.get("delta", {}).get("content") or "")
+        checks.append(
+            (
+                "dccai-local-80b stream usage",
+                "LOCAL_STREAM_OK" in "".join(local_stream_text) and local_stream_has_usage,
+                f"bytes={len(local_stream_body)}",
+            )
+        )
 
         response = client.post(
             "http://litellm:4000/v1/chat/completions",
@@ -173,6 +244,49 @@ def main():
                 "Chat API reasoning hidden",
                 "reasoning_content" not in json.dumps(message),
                 str(sorted(message.keys())),
+            )
+        )
+
+        response = client.post(
+            "http://open-webui:8080/api/chat/completions",
+            headers=user_headers,
+            json={
+                "model": "dccai.dccai-local-80b",
+                "messages": [{"role": "user", "content": "Reply with LOCAL_API_SHOULD_NOT_RUN."}],
+                "stream": False,
+            },
+        )
+        local_chat_api_body = response.text
+        local_chat_api_blocked = False
+        if response.status_code == 400:
+            try:
+                local_chat_api_blocked = response.json().get("detail") == "Model not found"
+            except ValueError:
+                local_chat_api_blocked = False
+        elif response.status_code == 200:
+            local_chat_api_blocked = (
+                "Webチャット画面からのみ" in local_chat_api_body
+                and "LOCAL_API_SHOULD_NOT_RUN" not in local_chat_api_body
+            )
+        checks.append(
+            (
+                "Chat API Local 80B blocked",
+                local_chat_api_blocked,
+                f"status={response.status_code} body={local_chat_api_body[:300]}",
+            )
+        )
+
+        response = client.post(
+            "http://127.0.0.1:3003/v1/responses",
+            headers=user_headers,
+            json={"model": "dccai.dccai-local-80b", "input": "LOCAL_API_SHOULD_NOT_RUN"},
+        )
+        checks.append(
+            (
+                "Responses API Local 80B blocked",
+                response.status_code == 400
+                and response.json().get("error", {}).get("type") == "invalid_request_error",
+                f"status={response.status_code} body={response.text[:240]}",
             )
         )
 

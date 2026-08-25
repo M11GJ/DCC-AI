@@ -1,8 +1,8 @@
-# DCC AI 仕様書(2026-08-21時点)
+# DCC AI 仕様書(2026-08-25時点)
 
 DCC(デジタルクリエイターズコミュニティ)部員専用AIチャットサービス。本ドキュメントは**別セッション/別AIへの引き継ぎ**を目的に、現在の構成を体系的にまとめた仕様書。時系列の作業ログではなく「今どうなっているか」を記述する。より詳細な経緯・トラブルシューティングの記録は`/opt/dccai/CLOUDFLARE-TUNNEL-INVESTIGATION.md`と`/opt/dccai/HANDOFF-2026-07-23.md`を参照。
 
-**このドキュメントは2026-08-21に`n200`へ実際にSSHし、稼働中のコンテナ・git状態・設定ファイル・systemdタイマー等を直接確認して更新したもの**。旧版(2026-08-01時点)からの差分は末尾「11. 2026-08-21の再調査で判明した差分・未文書化事項」に集約している。**引き継ぐAIは、この節を必ず読むこと**(旧版のまま放置されていた「動いていると思われていたが実際は止まっていた」項目が複数ある)。
+**このドキュメントは2026-08-25に`n200`とLocal 80Bサーバー`ais1-ser2`へ実際にSSHし、稼働状態・モデル接続・GPU搭載・API制限を確認して更新したもの**。旧経緯は「11. 2026-08-21の再調査で判明した差分・未文書化事項」、最新状態は「12. 2026-08-25 Local 80B追加」に記載する。
 
 ---
 
@@ -12,11 +12,12 @@ DCC(デジタルクリエイターズコミュニティ)部員専用AIチャッ�
 |---|---|
 | 名称 | DCC AI |
 | 対象 | DCC部員限定(Discord経由でギルド在籍を確認) |
-| 公開URL(チャットUI) | https://ai.shu-dcc.net |
+| 部員向け入口(DCC Hub) | https://app.shu-dcc.net/ (`/ai`から利用) |
+| 直接URL(Open WebUI/API) | https://ai.shu-dcc.net |
 | 公開URL(使用量ページ) | https://usage.shu-dcc.net |
 | 公開URL(Responses API) | https://responses.shu-dcc.net |
-| 提供モデル | High(DeepSeek V4 Flash Vision Exp / max) / Low(同 / high) / Code(DeepSeek V4 Flash 0731 / max) の3系統。公開モデルIDは従来どおり固定 |
-| ホスト | `ssh gunk@100.100.252.10`(通称n200、Linux実機。sudoパスワードレス、sshd非稼働でTailscale SSHのみ) |
+| 提供モデル | High / Low / Code(DeepSeek V4 Flash Vision Exp) + WebUI限定Local 80B(Qwen3 Coder Next Abliterated 79.7B Q4_K_M) |
+| ホスト | DCC本体:`ssh gunk@100.100.252.10`(n200) / Local推論:`ssh t2431030@100.68.87.103`(ais1-ser2、A40 48GB×2) |
 | アプリ本体 | `/opt/dccai`(git管理、root所有、GitHub remote: `github-dccai:M11GJ/DCC-AI.git`) |
 
 ---
@@ -41,11 +42,19 @@ dccai-responses   (:3003, 127.0.0.1限定) Responses APIゲートウェイ、mem
 searxng           (内部のみ)             Web検索、mem_limit 512m
 ```
 
-ollamaはn200には無い(GPU非搭載のため)。`docker-compose.yml`内にコメントアウトで経緯を記載。
+ollamaはn200には無い(GPU非搭載のため)。Local 80BだけはTailscale内の`ais1-ser2:11434`にあるシステムOllamaへLiteLLMから接続する。
 
 **リソース状況(2026-08-21実測)**: ホストRAM 15GB中11GB使用、空き816MB、swap 4GB中1.5GB使用中。**メモリは依然として逼迫気味**。open-webuiは1.33GB/1.5GB limit(約88%)、litellmは1013MB/2GB。ディスクは98GB中40GB使用(54GB空き、余裕あり)。
 
-### 2.3 Cloudflare Tunnel
+### 2.3 Local 80B推論ホスト(ais1-ser2)
+
+- Ubuntu 22.04 / NVIDIA A40 48GB×2 / RAM 125GiB
+- Ollama `0.32.15`。`OLLAMA_HOST=100.68.87.103:11434`でTailscale IPだけにbind
+- Ollamaの`qwen3next`安全制限に合わせて単一推論。モデルごとの`num_ctx=65536`で64K contextを確保
+- モデル:`huihui_ai/qwen3-coder-next-abliterated:latest`、digest `2a8a5c3c43a2...`、79.7B、Q4_K_M、text/tools対応、vision非対応
+- 同サーバーのOpen WebUIもこのシステムOllamaを使用する。localhost側にあった同一モデル登録は削除済み
+
+### 2.4 Cloudflare Tunnel
 
 トークン方式のリモート管理トンネル(Cloudflare Zero Trust dashboardで管理)。**DNS/ルーティングはCloudflare側で完結するため、ホストを跨ぐ移行でもトークンさえ同じなら設定変更不要**。現在3つのPublic Hostnameが同一トンネルに紐づく:
 
@@ -63,19 +72,20 @@ Cloudflare API tokenは無く、Public Hostnameの追加はダッシュボード
 
 ## 3. モデル構成(litellm)
 
-`litellm/config.yaml`で3系統を定義。**外部向けmodel_name(`dccai-high`/`dccai-low`/`dccai-code`)は固定し、中身だけを差し替える設計**。
+`litellm/config.yaml`で4系統を定義。既存の外部向けmodel_name(`dccai-high`/`dccai-low`/`dccai-code`)は固定し、新規Localだけ`dccai-local-80b`を追加する。
 
 | 系統 | 1st (litellm model_name) | 実体 | フォールバック順 |
 |---|---|---|---|
 | High | `dccai-high` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: max` | なし（同一API内リトライのみ） |
 | Low | `dccai-low` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: high` | なし（同一API内リトライのみ） |
 | Code | `dccai-code` | `openai/deepseek-v4-flash-vision-exp`(DeepSeek公式APIへのOpenAI互換直通) / `reasoning_effort: max` | なし（同一API内リトライのみ） |
+| Local 80B | `dccai-local-80b` | `ollama_chat/huihui_ai/qwen3-coder-next-abliterated:latest` / 64K context | なし。Open WebUI限定 |
 
 DeepSeek V4系は既定でreasoning(思考過程)を出力するため、`max_tokens`が小さいと本文前に打ち切られる。
 
-Vision Experimentalは、現行LiteLLMのDeepSeek専用adapter経由だと未知モデルとしてtext-only扱いされ画像部分が除去されるため、3系統とも`openai/` provider + `api_base: https://api.deepseek.com`で公式OpenAI互換APIへ中継する。`reasoning_effort`は`allowed_openai_params`、`thinking`は`extra_body`で明示的に通す。契約切れ・モデル廃止済みのCerebras/Featherlessフォールバックは失敗と遅延の原因になるため削除した。
+Vision Experimentalは、現行LiteLLMのDeepSeek専用adapter経由だと未知モデルとしてtext-only扱いされ画像部分が除去されるため、High/Low/Codeは`openai/` provider + `api_base: https://api.deepseek.com`で公式OpenAI互換APIへ中継する。`reasoning_effort`は`allowed_openai_params`、`thinking`は`extra_body`で明示的に通す。Local 80BはLiteLLM推奨の`ollama_chat/` providerで接続し、`num_ctx: 65536`と`keep_alive: 5m`を固定する。
 
-Open WebUI上の公開モデルID(Pipe経由):`dccai.dccai-high-vision` / `dccai.dccai-low-vision` / `dccai.dccai-code`
+Open WebUI上のモデルID(Pipe経由):`dccai.dccai-high-vision` / `dccai.dccai-low-vision` / `dccai.dccai-code` / `dccai.dccai-local-80b`。Local 80BはWebチャット画面限定で、外部APIからは拒否する。
 
 Geminiキーは将来復活できるよう`.env`に`GEMINI_API_KEY_1`〜`_5`の**5本**を保持しているが、現在は`config.yaml`のモデル定義と`docker-compose.yml`の環境変数受け渡しをコメントアウトし、fallbackからも外している。`gemini-key-health.py`は残置しているが、自動管理マーカーを`GEMINI_DISABLED_*`へ変更してあるため構成を書き換えない。
 
@@ -85,15 +95,16 @@ Geminiキーは将来復活できるよう`.env`に`GEMINI_API_KEY_1`〜`_5`の*
 
 Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下のポリシーを一元的に適用する:
 
-- **モデル選択**: 公開model_idの末尾サフィックス("high"/"low"/"code")で内部litellmモデル名へ変換
-- **同時実行制御**: グループ別セマフォ(`_STATE_BY_GROUP`)。High/Lowは`MAX_CONCURRENCY`(既定3)、Codeは`CODE_MAX_CONCURRENCY`(既定3)で別枠管理
+- **モデル選択**: High/Low/Code/Localの明示allowlistで内部litellmモデル名へ変換。未知IDをLowへ暗黙fallbackしない
+- **同時実行制御**: グループ別セマフォ(`_STATE_BY_GROUP`)。High/Low=3、Code=3、Local 80B=1で別枠管理
+- **WebUI限定運用**: Local 80BはAPIドキュメント・接続案内に掲載せず、Responses APIでは完全一致allowlistから除外する。Chat APIの通常呼び出し(`__metadata__.chat_id`なし)も上流へ送らず拒否するが、これは強固な認可境界ではなく非公開運用上のガードとする
 - **High日次上限**: `HIGH_DAILY_LIMIT`(既定20回/日)、`USAGE_FILE`にflock付きread-modify-writeで記録
 - **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定
   - WebUI呼び出しとAPI呼び出しの区別は`__metadata__.chat_id`の有無で判定(`is_api_call`)
   - litellm側の集計用`user`フィールドも`<user_id>:api`(API)/`<user_id>`(WebUI)で分離
   - モデル更新等で枠だけをリセットする場合は`scripts/reset_monthly_token_limit.py`をOpen WebUIコンテナ内で実行する。Postgresの全利用記録は残し、リセット前カウンターをJSONL監査ログとスナップショットへ保存したうえで現在枠だけ0にする。使用量ページは「総記録」と「現在の制限枠」を分けて表示する
 - **時刻基準**: High日次上限・API月間上限はどちらもJST(Asia/Tokyo)の暦日・暦月で判定
-- **画像処理**: High/Low/Codeすべてネイティブマルチモーダルモデルのため、画像を`image_url`形式のまま選択モデルへ直接渡す。別モデルへの画像転送やGemini/Ollamaの中間処理は使用しない
+- **画像処理**: High/Low/Codeは画像を`image_url`形式のまま直接渡す。Local 80Bは`vision=false`で、画像が含まれる場合は上流へ送らず非対応を案内
 - **API互換オプション**: `tools`/`tool_choice`/`response_format`/`stop`等の主要Chat Completions指定をLiteLLMへ転送する
 - **ストリーミング**: `stream_options.include_usage`を要求し、SSE末尾のusageチャンクからトークン数を取得(Open WebUI管理者ダッシュボードのトークン表示・月間カウンタ更新の両方に必要)
 
@@ -102,7 +113,7 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - Web検索はOpen WebUI → SearXNG(`http://searxng:8080`)で実行し、取得結果を`<source resource-type="web_search">`形式のRAGコンテキストとしてPipeへ渡す
 - 永続設定`config.rag.template`には元の質問を`{{QUERY}}`で必ず含める。Web検索ソースが存在する場合は「このリクエストでDCC AIの検索機能が実行済み」とモデルへ明示し、検索不能という定型的な断りを返させない
 - RAGテンプレートとモデル接続設定の再適用は`bash /opt/dccai/scripts/apply_open_webui_rag.sh`。実体は`scripts/configure_open_webui_rag.py`で、実行前にOpen WebUI DBの手動バックアップを作成する
-- DCC DiscordナレッジはHigh/Lowへ接続。Codeは`meta.knowledge=[]`として明示的に未接続
+- DCC DiscordナレッジはHigh/Lowへ接続。CodeとLocal 80Bは`meta.knowledge=[]`として明示的に未接続
 
 反映方法: `dccai_pipe.py`を編集後、`bash /opt/dccai/scripts/sync_pipe_to_db.sh`でOpen WebUIのSQLite(`function`テーブル)へ書き込み+open-webui再起動が必要(ファイルを置くだけでは反映されない)。
 
@@ -115,6 +126,7 @@ DCC部員はOpen WebUIで発行したAPIキー(Settings > Account > API keys)を
 ### 5.1 Chat Completions API(Pipe経由)
 - Endpoint: `https://ai.shu-dcc.net/api/chat/completions`(OpenAI SDK利用時は base_url に `https://ai.shu-dcc.net/api`)
 - モデルID: `dccai.dccai-high-vision` / `dccai.dccai-low-vision` / `dccai.dccai-code`
+- `dccai.dccai-local-80b`はWebUI限定のためChat Completions APIでは推論せず案内を返す
 - 上記4節のPipeポリシーがすべて適用される
 
 ### 5.2 Responses API(専用ゲートウェイ経由)
@@ -122,8 +134,8 @@ DCC部員はOpen WebUIで発行したAPIキー(Settings > Account > API keys)を
 - 実体は`scripts/responses_gateway.py`(python:3.11-slim + httpx、コンテナ`dccai-responses`)。**2026-08-03に大幅拡張済み**(313行追加、「ツール呼び出し互換層」節参照)。テスト`scripts/test_responses_gateway.py`も同時追加。
 - **背景**: litellm自体は`/v1/responses`に標準対応済みだが、Open WebUI本体の`/responses`ルートは「Connection」モデル専用でPipeモデルには使えない。PipeはChat Completions専用のフックしか持たないため、Responses API対応は別サービスとして実装した
 - 認証: Open WebUIの`api_key`テーブル(`webui.db`)を直接読んでBearerトークンを検証(Open WebUI自身と同じ検証方法)
-- Pipeとの整合性: モデルID解決・Code専用同時実行制限(3)・JST月間トークン上限判定はPipeと**同じロジック・同じファイル**(`TOKEN_USAGE_FILE`を`open-webui`名前付きボリューム経由で共有、flock方式も同一)を使うため、二重管理にならず正しく合算される
-- 画像入力は3モデルすべて選択モデルへそのまま渡す。内部reasoning itemは最終回答・tool callを残して公開応答から除外する。stream指定時も安全化後に標準SSEへ組み直す
+- Pipeとの整合性: High/Low/Codeの明示allowlist・Code専用同時実行制限(3)・JST月間トークン上限判定はPipeと**同じロジック・同じファイル**を使う。Local 80Bと未知IDはHTTP 400で拒否する
+- 画像入力はAPI公開中のHigh/Low/Codeへそのまま渡す。内部reasoning itemは最終回答・tool callを残して公開応答から除外する。stream指定時も安全化後に標準SSEへ組み直す
 - ストリーミング対応(`response.completed`イベントのusageを検出)
 - **ツール呼び出し互換層**: Responses API標準のfunction toolと、Codex系クライアントが送るChat Completions型のネスト形式をどちらも受理してLiteLLM向けに正規化する。DeepSeek V4のDSMLが`output_text`へ漏れた場合は公式DSML形式を解析し、`function_call`/`custom_tool_call`へ変換する
 - ツール付きストリーミングはDSML文字列をクライアントへ先に流さないため、上流の完了応答をバッファしてから標準Responses SSEイベントを再生成する。そのため、ツールを含まない通常ストリームと異なり最初のイベントまで上流生成時間ぶん待つ
@@ -217,4 +229,16 @@ Discordナレッジ同期の扱いは別途ユーザー指示待ち。Geminiヘ�
 
 ---
 
-*本ドキュメントは2026-08-21、Claude(Sonnet 5)がn200へ直接SSHし実機確認の上で作成し、同日Codexがモデル／マルチモーダル更新後の状態を追記した。次回引き継ぎ時は本節(11)の内容を消化した上で、新たな差分があれば追記・更新すること。*
+## 12. 2026-08-25 Local 80B追加
+
+- **表示名/ID**: `DCC AI Local 80B` / `dccai.dccai-local-80b`
+- **公開範囲**: Open WebUIのチャット画面のみ。Chat Completions APIはPipeで案内を返し、Responses APIはHTTP 400で拒否
+- **上流**: `ais1-ser2`のシステムOllama(`100.68.87.103:11434`)。Tailscale内からのみ到達可能
+- **モデル**: Qwen3 Coder Next Abliterated 79.7B Q4_K_M、64K context、text/tools対応、vision非対応
+- **並列性**: OllamaとPipeの両方を単一推論に統一。2件目以降はPipeで順番待ちにし、Ollamaへ同時送信しない
+- **ナレッジ**: DCC Discordは未接続(`knowledge=[]`)。Open WebUIのWeb検索とツールは利用可能
+- **既存契約**: High/Low/CodeのモデルID、DeepSeek上流、API月間枠は変更しない
+
+---
+
+*本ドキュメントは2026-08-25、Codexがn200とais1-ser2へ直接SSHし、Local 80Bのモデル実体・64K GPU搭載・単一推論・DCC経路を検証して更新した。*

@@ -112,14 +112,22 @@ def add_tokens(user_id: str, n: int) -> None:
 
 def resolve_model(raw_model: str):
     """公開向けID("dccai.dccai-high-vision"等)・litellm内部名("dccai-high"等)の
-    どちらで来ても内部名に正規化する(dccai_pipe.pyと同じsuffix判定ロジック)。
-    戻り値は (litellm_model, is_code)。"""
-    suffix = (raw_model or "").rsplit(".", 1)[-1].lower()
-    if "code" in suffix:
-        return "dccai-code", True
-    if "high" in suffix:
-        return "dccai-high", False
-    return "dccai-low", False
+    どちらで来ても完全一致のallowlistで内部名に正規化する。
+    戻り値は (litellm_model, is_code)。Local 80BはWebUI限定のため許可しない。"""
+    aliases = {
+        "dccai.dccai-code": ("dccai-code", True),
+        "dccai-code": ("dccai-code", True),
+        "dccai.dccai-high-vision": ("dccai-high", False),
+        "dccai-high-vision": ("dccai-high", False),
+        "dccai-high": ("dccai-high", False),
+        "dccai.dccai-low-vision": ("dccai-low", False),
+        "dccai-low-vision": ("dccai-low", False),
+        "dccai-low": ("dccai-low", False),
+    }
+    resolved = aliases.get((raw_model or "").strip().lower())
+    if resolved is None:
+        raise ValueError("model is not available through the Responses API")
+    return resolved
 
 
 def normalize_request_tools(payload: dict) -> None:
@@ -478,6 +486,15 @@ class Handler(http_server.BaseHTTPRequestHandler):
 
         normalize_request_tools(payload)
 
+        try:
+            litellm_model, is_code = resolve_model(payload.get("model", ""))
+        except ValueError as exc:
+            self._send_json(
+                400,
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+            )
+            return
+
         if MONTHLY_TOKEN_LIMIT > 0 and month_tokens_used(user_id) >= MONTHLY_TOKEN_LIMIT:
             self._send_json(
                 429,
@@ -493,7 +510,6 @@ class Handler(http_server.BaseHTTPRequestHandler):
             )
             return
 
-        litellm_model, is_code = resolve_model(payload.get("model", ""))
         payload["model"] = litellm_model
         payload["user"] = f"{user_id}:api"  # litellm側の集計もdccai_pipe.pyと同じ形式に揃える
         stream = bool(payload.get("stream"))
