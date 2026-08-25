@@ -4,6 +4,7 @@
 import json
 import sqlite3
 import time
+import uuid
 
 
 DB_PATH = "/app/backend/data/webui.db"
@@ -64,17 +65,79 @@ def main():
             (json.dumps(meta, ensure_ascii=False), now, "dccai.dccai-code"),
         )
 
-        row = conn.execute(
+        # Pipeが返すだけのモデルはアクセス制御用model行を持たず、一般ユーザーからは
+        # 「未設定モデル」として除外される。Codeモデルの表示設定を土台にLocal行を作り、
+        # 全認証ユーザー向けread grantを既存3モデルと同じ形で付与する。
+        local_row = conn.execute(
             "SELECT meta FROM model WHERE id = ?", (LOCAL_MODEL_ID,)
         ).fetchone()
-        if row:
-            local_meta = json.loads(row[0]) if row[0] else {}
-            local_meta["knowledge"] = []
-            local_capabilities = local_meta.setdefault("capabilities", {})
-            local_capabilities["vision"] = False
+        if local_row:
+            local_meta = json.loads(local_row[0]) if local_row[0] else {}
+        else:
+            source = conn.execute(
+                "SELECT user_id, params, meta FROM model WHERE id = ?",
+                ("dccai.dccai-code",),
+            ).fetchone()
+            if not source:
+                raise RuntimeError("DCC AI Code model row was not found")
+            local_meta = json.loads(source[2]) if source[2] else {}
             conn.execute(
-                "UPDATE model SET meta = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(local_meta, ensure_ascii=False), now, LOCAL_MODEL_ID),
+                """
+                INSERT INTO model(
+                    id, user_id, base_model_id, name, params, meta,
+                    updated_at, created_at, is_active
+                ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    LOCAL_MODEL_ID,
+                    source[0],
+                    "DCC AI Local 80B",
+                    source[1],
+                    json.dumps(local_meta, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+
+        local_meta["knowledge"] = []
+        local_capabilities = local_meta.setdefault("capabilities", {})
+        local_capabilities.update(
+            {
+                "vision": False,
+                "image_generation": False,
+                "file_context": True,
+                "file_upload": True,
+                "web_search": True,
+                "builtin_tools": True,
+            }
+        )
+        conn.execute(
+            "UPDATE model SET name = ?, meta = ?, is_active = 1, updated_at = ? WHERE id = ?",
+            (
+                "DCC AI Local 80B",
+                json.dumps(local_meta, ensure_ascii=False),
+                now,
+                LOCAL_MODEL_ID,
+            ),
+        )
+        grant_exists = conn.execute(
+            """
+            SELECT 1 FROM access_grant
+            WHERE resource_type = 'model' AND resource_id = ?
+              AND principal_type = 'user' AND principal_id = '*'
+              AND permission = 'read'
+            """,
+            (LOCAL_MODEL_ID,),
+        ).fetchone()
+        if not grant_exists:
+            conn.execute(
+                """
+                INSERT INTO access_grant(
+                    id, resource_type, resource_id, principal_type,
+                    principal_id, permission, created_at
+                ) VALUES (?, 'model', ?, 'user', '*', 'read', ?)
+                """,
+                (str(uuid.uuid4()), LOCAL_MODEL_ID, now),
             )
 
         # vision接尾辞なしの旧High/Lowは同名で表示され、ナレッジ設定も異なるため削除する。
@@ -97,10 +160,7 @@ def main():
     print("Updated rag.template with explicit QUERY and web-search awareness")
     print("Confirmed dccai.dccai-code knowledge=[] and vision=true")
     print("Confirmed Local 80B Pipe metadata knowledge=[] and vision=false")
-    if row:
-        print("Updated dccai.dccai-local-80b model-row metadata")
-    else:
-        print("Local 80B has no custom model row; Pipe metadata remains authoritative")
+    print("Confirmed dccai.dccai-local-80b model row and all-user read grant")
     print("Removed stale DCC AI High/Low model rows and access grants")
 
 

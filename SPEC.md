@@ -97,7 +97,7 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 
 - **モデル選択**: High/Low/Code/Localの明示allowlistで内部litellmモデル名へ変換。未知IDをLowへ暗黙fallbackしない
 - **同時実行制御**: グループ別セマフォ(`_STATE_BY_GROUP`)。High/Low=3、Code=3、Local 80B=1で別枠管理
-- **WebUI限定運用**: Local 80BはAPIドキュメント・接続案内に掲載せず、Responses APIでは完全一致allowlistから除外する。Chat APIの通常呼び出し(`__metadata__.chat_id`なし)も上流へ送らず拒否するが、これは強固な認可境界ではなく非公開運用上のガードとする
+- **WebUI限定運用**: Local 80Bは認証済みの一般ユーザーを含む全DCCユーザーへ公開する。APIドキュメント・接続案内には掲載せず、Responses APIでは完全一致allowlistから除外する。Chat APIの通常呼び出し(`__metadata__.chat_id`なし)も上流へ送らず拒否するが、これは強固な認可境界ではなく非公開運用上のガードとする
 - **High日次上限**: `HIGH_DAILY_LIMIT`(既定20回/日)、`USAGE_FILE`にflock付きread-modify-writeで記録
 - **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定
   - WebUI呼び出しとAPI呼び出しの区別は`__metadata__.chat_id`の有無で判定(`is_api_call`)
@@ -232,7 +232,7 @@ Discordナレッジ同期の扱いは別途ユーザー指示待ち。Geminiヘ�
 ## 12. 2026-08-25 Local 80B追加
 
 - **表示名/ID**: `DCC AI Local 80B` / `dccai.dccai-local-80b`
-- **公開範囲**: Open WebUIのチャット画面のみ。Chat Completions APIはPipeで案内を返し、Responses APIはHTTP 400で拒否
+- **公開範囲**: 認証済みの一般ユーザーを含む全DCCユーザーのOpen WebUIチャット画面。Chat Completions APIはPipeで案内を返し、Responses APIはHTTP 400で拒否
 - **上流**: `ais1-ser2`のシステムOllama(`100.68.87.103:11434`)。Tailscale内からのみ到達可能
 - **モデル**: Qwen3 Coder Next Abliterated 79.7B Q4_K_M、64K context、text/tools対応、vision非対応
 - **並列性**: OllamaとPipeの両方を単一推論に統一。2件目以降はPipeで順番待ちにし、Ollamaへ同時送信しない
