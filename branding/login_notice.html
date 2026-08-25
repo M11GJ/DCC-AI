@@ -1,4 +1,10 @@
 <script>
+// Open WebUI remains available inside the Portal iframe and through its APIs.
+// A standalone browser visit uses the Portal as the single user-facing entry point.
+if (window.top === window.self && window.location.hostname === 'ai.shu-dcc.net') {
+  window.location.replace('https://app.shu-dcc.net/ai');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const NOTICE_ID = 'dcc-login-notice';
   const apply = () => {
