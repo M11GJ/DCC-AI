@@ -97,6 +97,7 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 
 - **モデル選択**: High/Low/Code/Localの明示allowlistで内部litellmモデル名へ変換。未知IDをLowへ暗黙fallbackしない
 - **同時実行制御**: グループ別セマフォ(`_STATE_BY_GROUP`)。High/Low=3、Code=3、Local 80B=1で別枠管理
+- **停止時の解放**: ストリーム本体の中で枠を取得し、停止・切断・例外・待機キャンセル時は`finally`で必ず解放する。Open WebUI本体のPipeラッパーも内側のasync generatorへ`aclose()`を伝播し、待機は最大180秒で終了する
 - **WebUI限定運用**: Local 80Bは認証済みの一般ユーザーを含む全DCCユーザーへ公開する。APIドキュメント・接続案内には掲載せず、Responses APIでは完全一致allowlistから除外する。Chat APIの通常呼び出し(`__metadata__.chat_id`なし)も上流へ送らず拒否するが、これは強固な認可境界ではなく非公開運用上のガードとする
 - **High日次上限**: `HIGH_DAILY_LIMIT`(既定20回/日)、`USAGE_FILE`にflock付きread-modify-writeで記録
 - **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定

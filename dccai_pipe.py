@@ -1,7 +1,7 @@
 """
 title: DCC AI
 author: DCC
-version: 1.1.0
+version: 1.1.1
 license: MIT
 description: DCC部員向け DCC AI High/Low/Code/Local 80B。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
 requirements: httpx
@@ -14,6 +14,7 @@ import re
 import base64
 import glob
 import mimetypes
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Awaitable, Any
 
@@ -26,6 +27,10 @@ from pydantic import BaseModel, Field
 # モデル系統ごとのcapは独立して変更できる。
 _STATE_BY_GROUP = {}
 JST = timezone(timedelta(hours=9), "JST")
+
+
+class _QueueWaitTimeout(Exception):
+    """Raised when a request cannot obtain a model slot within the queue limit."""
 
 
 def _today_jst() -> str:
@@ -55,6 +60,54 @@ def _get_group_state(group: str, cap: int) -> dict:
         st = {"sem": asyncio.Semaphore(cap), "cap": cap, "active": 0, "waiting": 0}
         _STATE_BY_GROUP[group] = st
     return st
+
+
+@asynccontextmanager
+async def _hold_group_slot(state: dict, cap: int, max_wait: int, status):
+    """Acquire one model slot and restore all counters on stop/cancel/error."""
+    sem = state["sem"]
+    queued = False
+    was_queued = False
+    acquired = False
+    active_marked = False
+    try:
+        if state["active"] >= cap:
+            queued = True
+            was_queued = True
+            state["waiting"] += 1
+            ahead = state["active"] + state["waiting"] - 1
+            await status(
+                f"🕒 混雑しています。順番待ち中…（あなたの前に約 {ahead} 件）",
+                False,
+            )
+            try:
+                await asyncio.wait_for(sem.acquire(), timeout=max(0, max_wait))
+            except asyncio.TimeoutError as exc:
+                raise _QueueWaitTimeout from exc
+        else:
+            await sem.acquire()
+
+        acquired = True
+        if queued:
+            state["waiting"] -= 1
+            queued = False
+        state["active"] += 1
+        active_marked = True
+
+        if state["active"] > cap:
+            raise RuntimeError("model concurrency state exceeded its configured cap")
+        if was_queued:
+            # A stopped stream may be closed before its first content chunk. Keeping
+            # this status inside the guarded scope makes that cancellation safe too.
+            await status("✅ 順番が来ました。生成を開始します。", True)
+        yield
+    finally:
+        if queued:
+            state["waiting"] = max(0, state["waiting"] - 1)
+        if active_marked:
+            state["active"] = max(0, state["active"] - 1)
+        if acquired:
+            sem.release()
 
 
 class Pipe:
@@ -490,19 +543,10 @@ class Pipe:
                 ]
 
         # ---- 同時実行セマフォ＋順番待ちの見える化（④） ----
-        # グループ(default=High/Low, code=Code, local=Local 80B)ごとに別セマフォ・別カウンタを使う
+        # ストリーミングではgeneratorを返しただけでは処理がまだ始まらないため、slot取得も
+        # generator本体の中で行う。停止・切断・待機中キャンセル時はcontext managerのfinallyで
+        # active/waiting/semaphoreを必ず元へ戻す。
         state = _get_group_state(concurrency_group, concurrency_cap)
-        sem = state["sem"]
-        must_wait = state["active"] >= concurrency_cap
-        if must_wait:
-            state["waiting"] += 1
-            ahead = state["active"] + state["waiting"] - 1
-            await status(f"🕒 混雑しています。順番待ち中…（あなたの前に約 {ahead} 件）", False)
-        await sem.acquire()
-        if must_wait:
-            state["waiting"] -= 1
-            await status("✅ 順番が来ました。生成を開始します。", True)
-        state["active"] += 1
 
         url = f"{self.valves.LITELLM_BASE_URL}/chat/completions"
         headers = self._headers()
@@ -519,13 +563,18 @@ class Pipe:
             if is_high and self.valves.HIGH_DAILY_LIMIT > 0:
                 self._incr_high(user_id)
 
-        try:
-            if payload["stream"]:
-                async def event_stream():
-                    waited = 0.0
-                    started = False
-                    captured_tokens = 0
-                    try:
+        if payload["stream"]:
+            async def event_stream():
+                waited = 0.0
+                started = False
+                captured_tokens = 0
+                try:
+                    async with _hold_group_slot(
+                        state,
+                        concurrency_cap,
+                        self.valves.MAX_QUEUE_WAIT,
+                        status,
+                    ):
                         async with httpx.AsyncClient(timeout=timeout) as client:
                             while True:
                                 try:
@@ -581,16 +630,24 @@ class Pipe:
                                     await asyncio.sleep(3.0)
                                     waited += 3.0
                                     continue
-                    finally:
-                        if is_api_call and captured_tokens:
-                            self._add_tokens(user_id, captured_tokens)
-                        state["active"] -= 1
-                        sem.release()
+                except _QueueWaitTimeout:
+                    yield busy_msg
+                except Exception as e:
+                    yield f"Error: {e}"
+                finally:
+                    if is_api_call and captured_tokens:
+                        self._add_tokens(user_id, captured_tokens)
 
-                return event_stream()
+            return event_stream()
 
-            # 非ストリーミング
-            try:
+        # 非ストリーミング
+        try:
+            async with _hold_group_slot(
+                state,
+                concurrency_cap,
+                self.valves.MAX_QUEUE_WAIT,
+                status,
+            ):
                 waited = 0.0
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     while True:
@@ -614,16 +671,7 @@ class Pipe:
                         count_high()
                         await status("✅ 生成しました。", True)
                         return resp_json
-            finally:
-                state["active"] -= 1
-                sem.release()
-
+        except _QueueWaitTimeout:
+            return busy_msg
         except Exception as e:
-            # ストリーミング開始前の例外時はここでスロット解放
-            if state["active"] > 0:
-                state["active"] -= 1
-                try:
-                    sem.release()
-                except Exception:
-                    pass
             return f"Error: {e}"

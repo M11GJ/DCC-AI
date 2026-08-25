@@ -1,4 +1,7 @@
 FROM ghcr.io/open-webui/open-webui:v0.11.0
+COPY scripts/patch_open_webui_stream_close.py /tmp/patch_open_webui_stream_close.py
+RUN python3 /tmp/patch_open_webui_stream_close.py /app/backend/open_webui/functions.py && \
+    rm -f /tmp/patch_open_webui_stream_close.py
 COPY branding/out/favicon.png                  /app/backend/open_webui/static/favicon.png
 COPY branding/out/favicon.svg                  /app/backend/open_webui/static/favicon.svg
 COPY branding/out/favicon.ico                  /app/backend/open_webui/static/favicon.ico
