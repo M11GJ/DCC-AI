@@ -44,7 +44,7 @@ def patch_source(source: str) -> str:
         if after in source:
             continue
         if source.count(before) != 1:
-            raise RuntimeError("Open WebUI stream wrapper did not match the expected v0.11.0 source")
+            raise RuntimeError("Open WebUI stream wrapper did not match the expected v0.11.3 source")
         source = source.replace(before, after, 1)
     return source
 

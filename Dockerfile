@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:v0.11.0
+FROM ghcr.io/open-webui/open-webui:v0.11.3
 COPY scripts/patch_open_webui_stream_close.py /tmp/patch_open_webui_stream_close.py
 RUN python3 /tmp/patch_open_webui_stream_close.py /app/backend/open_webui/functions.py && \
     rm -f /tmp/patch_open_webui_stream_close.py
