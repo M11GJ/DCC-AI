@@ -2,6 +2,19 @@ FROM ghcr.io/open-webui/open-webui:v0.11.3
 COPY scripts/patch_open_webui_stream_close.py /tmp/patch_open_webui_stream_close.py
 RUN python3 /tmp/patch_open_webui_stream_close.py /app/backend/open_webui/functions.py && \
     rm -f /tmp/patch_open_webui_stream_close.py
+
+# v0.11.0のHTMLをWebViewやブラウザが保持していても、v0.11.3の同等entryを
+# 旧ハッシュ名で配信して更新直後の白画面を防ぐ。内容は常に現在のentryを使う。
+RUN set -eu; \
+    entry_dir=/app/build/_app/immutable/entry; \
+    asset_dir=/app/build/_app/immutable/assets; \
+    start_src="$(find "$entry_dir" -maxdepth 1 -type f -name 'start.*.js' ! -name 'start.BcfU-xkP.js' -print -quit)"; \
+    app_src="$(find "$entry_dir" -maxdepth 1 -type f -name 'app.*.js' ! -name 'app.WPjxzi0v.js' -print -quit)"; \
+    css_src="$(find "$asset_dir" -maxdepth 1 -type f -name '0.*.css' ! -name '0.D-1LH_Ar.css' -print -quit)"; \
+    test -n "$start_src" && test -n "$app_src" && test -n "$css_src"; \
+    cp "$start_src" "$entry_dir/start.BcfU-xkP.js"; \
+    cp "$app_src" "$entry_dir/app.WPjxzi0v.js"; \
+    cp "$css_src" "$asset_dir/0.D-1LH_Ar.css"
 COPY branding/out/favicon.png                  /app/backend/open_webui/static/favicon.png
 COPY branding/out/favicon.svg                  /app/backend/open_webui/static/favicon.svg
 COPY branding/out/favicon.ico                  /app/backend/open_webui/static/favicon.ico
