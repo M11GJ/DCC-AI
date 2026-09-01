@@ -170,6 +170,7 @@ Discord OAuth(独自、Open WebUIとは別実装)またはDCC Login(OIDC Authori
 - バックアップ: `/opt/dccai/scripts/backup.sh` + systemd timer(JST毎日03:00・7世代)。`umask 077`で作成し、既存世代もroot専用権限に統一。`OFFSITE_BACKUP_DIR`に別ディスク/NASのマウントポイントを指定すると同時コピーする。詳細は`/opt/dccai/BACKUP.md`
 - `open-webui.env`の変更は`docker compose restart`では反映されず`up -d`(再作成)が必要
 - Open WebUIのベースイメージは`Dockerfile`と`branding/Dockerfile`で`v0.11.3`に固定(2026-09-01に更新)。更新時は両方のタグを揃え、`docker compose build --pull open-webui && docker compose up -d open-webui`でカスタムブランドイメージを再ビルドする
+- v0.11.0からv0.11.3への更新では、DCC AppsのWebViewやブラウザに残った旧HTMLが旧ハッシュのentryを参照して白画面になるため、旧`start`/`app`/基底CSS名を現在のv0.11.3資産へコピーして互換配信する。旧名のHTTP 200とDCC Apps内iframeの起動を更新後に確認する
 - litellmの`config.yaml`はボリュームマウント(`:ro`)のため、内容変更後は`docker compose restart litellm`で明示的に再起動する必要がある(`up -d`だけでは変更なしと判定され再作成されないことがある)
 - cloudflaredの断続的502問題(旧ホスト時代に発生)は新規トンネル作成で解消。現在は`--protocol http2`固定+watchdog(`dccai-cloudflared-watchdog.timer`、2分毎、**2026-08-21時点で稼働確認済み**)で保険をかけている
 
