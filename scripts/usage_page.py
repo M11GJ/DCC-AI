@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
 DCC AI - Usage Page Server
-Discordログイン(独自OAuth2、既存のDiscordアプリを再利用)で本人確認し、
+Discordログイン(独自OAuth2、既存のDiscordアプリを再利用)または
+DCC Login(OIDC Authorization Code + PKCE S256)で本人確認し、
 自分のトークン消費量(WebUI分/API分の内訳)を表示する。
 集計データはlitellmのREST /spend/logs(limit/end_user_idフィルタが効かず
 毎回全件をmessages/response列込みで返すため極端に遅い)を経由せず、
 同じdocker network上のPostgresへpsycopg2で直接問い合わせる。
 """
 import base64
+import binascii
 import hashlib
 import hmac
 import http.server
+import html
 import json
 import os
 import re
+import secrets
 import sqlite3
 import time
 import urllib.error
@@ -32,6 +36,8 @@ PORT = int(os.environ.get("PORT", "3002"))
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "")
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "")
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://usage.shu-dcc.net")
+DCC_LOGIN_ISSUER = os.environ.get("DCC_LOGIN_ISSUER", "https://id.shu-dcc.net").rstrip("/")
+DCC_LOGIN_CLIENT_ID = os.environ.get("DCC_LOGIN_CLIENT_ID", "dccai_usage_v1")
 REQUIRED_GUILD_ID = os.environ.get("REQUIRED_GUILD_ID", "1304292402386964502")
 SESSION_SECRET = os.environ.get("USAGE_SESSION_SECRET", "")
 LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://litellm:4000")
@@ -46,6 +52,7 @@ TOKEN_RESET_LOG_FILE = os.environ.get(
 # (Open WebUIの管理画面でValvesを変更した場合はこちらの環境変数も合わせて変更が必要)。
 MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "10000000"))
 SESSION_TTL = 6 * 3600
+OAUTH_FLOW_TTL = 10 * 60
 
 
 def _pg_query(sql, params=None):
@@ -58,6 +65,8 @@ def _pg_query(sql, params=None):
         conn.close()
 
 COOKIE_NAME = "dccai_usage_session"
+DISCORD_FLOW_COOKIE_NAME = "dccai_usage_discord_flow"
+DCC_FLOW_COOKIE_NAME = "dccai_usage_dcc_flow"
 
 
 def _sign(value: str) -> str:
@@ -96,6 +105,87 @@ def read_session(cookie_header: str):
         return discord_id
     except ValueError:
         return None
+
+
+def make_oauth_flow(state: str, verifier: str = "") -> str:
+    payload = json.dumps(
+        {"state": state, "verifier": verifier, "exp": int(time.time()) + OAUTH_FLOW_TTL},
+        separators=(",", ":"),
+    ).encode()
+    encoded = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    return _sign(encoded)
+
+
+def read_oauth_flow(cookie_header: str, cookie_name: str):
+    if not cookie_header:
+        return None
+    jar = cookies.SimpleCookie()
+    jar.load(cookie_header)
+    morsel = jar.get(cookie_name)
+    if not morsel:
+        return None
+    encoded = _verify(morsel.value)
+    if not encoded:
+        return None
+    try:
+        encoded += "=" * (-len(encoded) % 4)
+        value = json.loads(base64.urlsafe_b64decode(encoded).decode())
+        if int(value["exp"]) < time.time():
+            return None
+        state = value["state"]
+        verifier = value.get("verifier", "")
+        if not isinstance(state, str) or not isinstance(verifier, str):
+            return None
+        return state, verifier
+    except (binascii.Error, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def session_cookie(discord_id: str) -> str:
+    return (
+        f"{COOKIE_NAME}={make_session(discord_id)}; Path=/; HttpOnly; Secure; "
+        f"SameSite=Lax; Max-Age={SESSION_TTL}"
+    )
+
+
+def flow_cookie(name: str, value: str) -> str:
+    return (
+        f"{name}={value}; Path=/; HttpOnly; Secure; SameSite=Lax; "
+        f"Max-Age={OAUTH_FLOW_TTL}"
+    )
+
+
+def clear_cookie(name: str) -> str:
+    return f"{name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
+
+
+def dcc_discord_id(userinfo):
+    discord_ids = dcc_discord_ids(userinfo)
+    return discord_ids[0] if discord_ids else None
+
+
+def dcc_discord_ids(userinfo):
+    if not isinstance(userinfo, dict) or userinfo.get("dcc_member") is not True:
+        return []
+    primary = userinfo.get("discord_id")
+    candidates = userinfo.get("discord_ids")
+    if not isinstance(primary, str) or not re.fullmatch(r"\d{17,20}", primary):
+        return []
+    if not isinstance(candidates, list):
+        candidates = [primary]
+    validated = []
+    for candidate in candidates:
+        if isinstance(candidate, str) and re.fullmatch(r"\d{17,20}", candidate) and candidate not in validated:
+            validated.append(candidate)
+    if primary not in validated:
+        return []
+    return [primary, *(candidate for candidate in validated if candidate != primary)]
+
+
+def make_pkce_pair():
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return verifier, challenge
 
 
 # Discord APIはUser-Agent無しのリクエストを403で弾くため必須
@@ -463,6 +553,59 @@ THEME_TOGGLE_SCRIPT_BLOCK = """
 </script>
 """
 
+LOGIN_TEMPLATE = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DCC AI - 使用量ログイン</title>
+<style>""" + THEME_CSS_BLOCK.format() + """
+  .login-root { min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; }
+  .login-card { width: min(440px, 100%); background: var(--surface-1); border: 1px solid var(--border);
+                border-radius: 16px; padding: 28px; box-sizing: border-box; }
+  .login-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  h1 { margin: 0; font-size: 1.45rem; }
+  .lead { color: var(--text-secondary); line-height: 1.7; margin: 12px 0 22px; }
+  .login-actions { display: grid; gap: 12px; }
+  .login-btn { min-height: 50px; display: flex; align-items: center; justify-content: center; border-radius: 10px;
+               padding: 0 16px; font-weight: 700; text-decoration: none; border: 1px solid var(--border); }
+  .login-btn-primary, .login-btn-primary:visited { background: #1677e8; border-color: #1677e8; color: #fff; }
+  .login-btn-secondary, .login-btn-secondary:visited { background: var(--page); color: var(--text-primary); }
+  .login-btn:hover { filter: brightness(.96); }
+  .login-note { margin: 18px 0 0; color: var(--text-muted); font-size: .82rem; line-height: 1.6; }
+  .login-error { margin: 0 0 16px; border: 1px solid #d64545; border-radius: 8px; padding: 10px 12px;
+                 color: #d64545; font-size: .9rem; }
+</style>
+</head>
+<body>
+<main class="login-root">
+  <section class="login-card">
+    <div class="login-head">
+      <h1>DCC AI 使用量</h1>
+      <button class="pill-btn" id="theme-toggle" type="button" aria-label="表示テーマを切り替える">🌓</button>
+    </div>
+    <p class="lead">ログイン方法を選択してください。どちらを選んでも同じ利用状況を表示します。</p>
+    {error}
+    <div class="login-actions">
+      <a class="login-btn login-btn-primary" href="/login/dcc">DCC Loginでログイン</a>
+      <a class="login-btn login-btn-secondary" href="/login/discord">Discordでログイン</a>
+    </div>
+    <p class="login-note">DCC部員専用です。DCC Loginは検証済みの部員アカウント、DiscordログインはDCCサーバー所属を確認します。</p>
+  </section>
+</main>
+""" + THEME_TOGGLE_SCRIPT_BLOCK.format() + """
+</body>
+</html>
+"""
+
+
+def login_page(error_message=""):
+    error = (
+        f'<p class="login-error" role="alert">{html.escape(error_message)}</p>'
+        if error_message else ""
+    )
+    return LOGIN_TEMPLATE.replace("{error}", error)
+
 PAGE_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -708,7 +851,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         for k, v in (extra_headers or {}).items():
-            self.send_header(k, v)
+            values = v if isinstance(v, (list, tuple)) else [v]
+            for value in values:
+                self.send_header(k, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(payload)
@@ -719,10 +864,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._route()
-        except Exception as e:
+        except Exception:
             # Cloudflareのエッジは4xx/5xxをオリジンの本文ごと自前のエラーページに
             # 差し替えることがあるため、このページは常に200を返し本文で状態を伝える
-            self._send(200, f"内部エラー: {e}")
+            self._send(200, login_page("内部エラーが発生しました。しばらく待ってから再度お試しください。"))
 
     def _route(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -734,19 +879,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if path == "/login":
+            self._send(200, login_page())
+            return
+
+        if path == "/login/discord":
+            state = secrets.token_urlsafe(32)
             params = urllib.parse.urlencode({
                 "client_id": DISCORD_CLIENT_ID,
                 "redirect_uri": f"{PUBLIC_BASE_URL}/callback",
                 "response_type": "code",
                 "scope": "identify guilds",
+                "state": state,
             })
-            self._send(302, "", extra_headers={"Location": f"https://discord.com/oauth2/authorize?{params}"})
+            self._send(302, "", extra_headers={
+                "Location": f"https://discord.com/oauth2/authorize?{params}",
+                "Set-Cookie": flow_cookie(DISCORD_FLOW_COOKIE_NAME, make_oauth_flow(state)),
+            })
             return
 
         if path == "/callback":
             code = qs.get("code", [None])[0]
-            if not code:
-                self._send(200, "Bad request: missing code")
+            state = qs.get("state", [None])[0]
+            flow = read_oauth_flow(self.headers.get("Cookie", ""), DISCORD_FLOW_COOKIE_NAME)
+            if not code or not state or not flow or not hmac.compare_digest(state, flow[0]):
+                self._send(200, login_page("Discordログインを確認できませんでした。最初からやり直してください。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DISCORD_FLOW_COOKIE_NAME)})
                 return
             try:
                 token_resp = http_post_form_json(
@@ -769,24 +926,86 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     {"Authorization": f"Bearer {access_token}"},
                 )
                 guild_ids = [g["id"] for g in guilds_resp]
-            except Exception as e:
-                self._send(200, f"Discordとの通信に失敗しました: {e}")
+            except Exception:
+                self._send(200, login_page("Discordとの通信に失敗しました。しばらく待ってから再度お試しください。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DISCORD_FLOW_COOKIE_NAME)})
                 return
 
             if REQUIRED_GUILD_ID and REQUIRED_GUILD_ID not in guild_ids:
-                self._send(
-                    200,
-                    "<h2>DCC AI 使用量ページは DCC 部員専用です</h2>"
-                    "<p>DCC の Discord サーバーに参加してから、もう一度お試しください。</p>",
-                )
+                self._send(200, login_page("DCCのDiscordサーバー所属を確認できませんでした。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DISCORD_FLOW_COOKIE_NAME)})
                 return
 
-            session = make_session(me["id"])
-            cookie = (
-                f"{COOKIE_NAME}={session}; Path=/; HttpOnly; Secure; "
-                f"SameSite=Lax; Max-Age={SESSION_TTL}"
+            discord_id = me.get("id") if isinstance(me, dict) else None
+            if not isinstance(discord_id, str) or not re.fullmatch(r"\d{17,20}", discord_id):
+                self._send(200, login_page("Discordアカウントを確認できませんでした。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DISCORD_FLOW_COOKIE_NAME)})
+                return
+            self._send(302, "", extra_headers={
+                "Location": "/",
+                "Set-Cookie": [session_cookie(discord_id), clear_cookie(DISCORD_FLOW_COOKIE_NAME)],
+            })
+            return
+
+        if path == "/login/dcc":
+            state = secrets.token_urlsafe(32)
+            verifier, challenge = make_pkce_pair()
+            params = urllib.parse.urlencode({
+                "client_id": DCC_LOGIN_CLIENT_ID,
+                "redirect_uri": f"{PUBLIC_BASE_URL}/callback/dcc",
+                "response_type": "code",
+                "scope": "openid profile dcc.discord",
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            })
+            self._send(302, "", extra_headers={
+                "Location": f"{DCC_LOGIN_ISSUER}/api/oidc/authorize?{params}",
+                "Set-Cookie": flow_cookie(DCC_FLOW_COOKIE_NAME, make_oauth_flow(state, verifier)),
+            })
+            return
+
+        if path == "/callback/dcc":
+            code = qs.get("code", [None])[0]
+            state = qs.get("state", [None])[0]
+            flow = read_oauth_flow(self.headers.get("Cookie", ""), DCC_FLOW_COOKIE_NAME)
+            if not code or not state or not flow or not flow[1] or not hmac.compare_digest(state, flow[0]):
+                self._send(200, login_page("DCC Loginを確認できませんでした。最初からやり直してください。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DCC_FLOW_COOKIE_NAME)})
+                return
+            try:
+                token_resp = http_post_form_json(
+                    f"{DCC_LOGIN_ISSUER}/api/oidc/token",
+                    {
+                        "client_id": DCC_LOGIN_CLIENT_ID,
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": f"{PUBLIC_BASE_URL}/callback/dcc",
+                        "code_verifier": flow[1],
+                    },
+                )
+                access_token = token_resp["access_token"]
+                userinfo = http_get_json(
+                    f"{DCC_LOGIN_ISSUER}/api/oidc/userinfo",
+                    {"Authorization": f"Bearer {access_token}"},
+                )
+            except Exception:
+                self._send(200, login_page("DCC Loginとの通信に失敗しました。しばらく待ってから再度お試しください。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DCC_FLOW_COOKIE_NAME)})
+                return
+            discord_ids = dcc_discord_ids(userinfo)
+            if not discord_ids:
+                self._send(200, login_page("DCC Loginの部員アカウントを確認できませんでした。"),
+                           extra_headers={"Set-Cookie": clear_cookie(DCC_FLOW_COOKIE_NAME)})
+                return
+            discord_id = next(
+                (candidate for candidate in discord_ids if find_openwebui_user(candidate)),
+                discord_ids[0],
             )
-            self._send(302, "", extra_headers={"Location": "/", "Set-Cookie": cookie})
+            self._send(302, "", extra_headers={
+                "Location": "/",
+                "Set-Cookie": [session_cookie(discord_id), clear_cookie(DCC_FLOW_COOKIE_NAME)],
+            })
             return
 
         # ここから先は要ログイン
@@ -995,6 +1214,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if not SESSION_SECRET:
+        raise RuntimeError("USAGE_SESSION_SECRET is required")
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"dccai-usage listening on :{PORT}")
     server.serve_forever()

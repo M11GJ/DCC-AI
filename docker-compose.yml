@@ -94,6 +94,8 @@ services:
       - TZ=Asia/Tokyo
       - PORT=3002
       - PUBLIC_BASE_URL=https://usage.shu-dcc.net
+      - DCC_LOGIN_ISSUER=https://id.shu-dcc.net
+      - DCC_LOGIN_CLIENT_ID=dccai_usage_v1
       - REQUIRED_GUILD_ID=1304292402386964502
       - WEBUI_DB_PATH=/webui-data/webui.db
       - LITELLM_BASE_URL=http://litellm:4000

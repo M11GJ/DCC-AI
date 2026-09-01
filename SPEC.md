@@ -32,12 +32,12 @@ DCC(デジタルクリエイターズコミュニティ)部員専用AIチャッ�
 ### 2.2 n200のコンテナ構成(2026-08-21確認、8コンテナ全て稼働中・再起動回数0)
 
 ```
-open-webui        (:3000→8080, 127.0.0.1限定) チャットUI本体(v0.11.0)、custom build、mem_limit 1536m
+open-webui        (:3000→8080, 127.0.0.1限定) チャットUI本体(v0.11.3)、custom build、mem_limit 1536m
 litellm           (:4000, 127.0.0.1限定) モデルルーティング・spend記録、mem_limit 2048m
 dccai-postgres    (内部:5432のみ)        litellmのspend/token永続化、mem_limit 256m
 dccai-cloudflared (network_mode: host)   Cloudflare Tunnel、--protocol http2、mem_limit 256m
 dccai-dashboard   (:3001, 127.0.0.1限定) LiteLLM Prometheusメトリクスの簡易ダッシュボード、mem_limit 128m
-dccai-usage       (:3002, 127.0.0.1限定) 個人別使用量ページ(Discord OAuth)、mem_limit 256m
+dccai-usage       (:3002, 127.0.0.1限定) 個人別使用量ページ(Discord OAuth / DCC Login)、mem_limit 256m
 dccai-responses   (:3003, 127.0.0.1限定) Responses APIゲートウェイ、mem_limit 256m
 searxng           (内部のみ)             Web検索、mem_limit 512m
 ```
@@ -153,7 +153,7 @@ DCC部員はOpen WebUIで発行したAPIキー(Settings > Account > API keys)を
 
 ## 7. 使用量ページ(`usage_page.py`、dccai-usageコンテナ)
 
-Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を提供:
+Discord OAuth(独自、Open WebUIとは別実装)またはDCC Login(OIDC Authorization Code + PKCE S256)でログインし、以下を提供。DCC Loginは専用scope `dcc.discord`で検証済みDiscord IDを受け取り、既存のOpen WebUIアカウントへ同一の方法で対応付ける:
 
 - **個人ページ(`/`)**: 全期間合計・WebUI/API内訳・モデル別内訳・**今月のAPI利用状況(月間上限に対する%バー、70%で黄・95%で赤)**
 - **ランキング(`/ranking`)**: 今月の消費ランキング(WebUI+API合算)、全体の合計ランキング
@@ -169,7 +169,7 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 - バックアップ: `/opt/dccai/scripts/backup.sh` + systemd timer(JST毎日03:00・7世代)。`umask 077`で作成し、既存世代もroot専用権限に統一。`OFFSITE_BACKUP_DIR`に別ディスク/NASのマウントポイントを指定すると同時コピーする。詳細は`/opt/dccai/BACKUP.md`
 - `open-webui.env`の変更は`docker compose restart`では反映されず`up -d`(再作成)が必要
-- Open WebUIのベースイメージは`Dockerfile`と`branding/Dockerfile`で`v0.11.0`に固定(2026-08-01に更新)。更新時は両方のタグを揃え、`docker compose build --pull open-webui && docker compose up -d open-webui`でカスタムブランドイメージを再ビルドする
+- Open WebUIのベースイメージは`Dockerfile`と`branding/Dockerfile`で`v0.11.3`に固定(2026-09-01に更新)。更新時は両方のタグを揃え、`docker compose build --pull open-webui && docker compose up -d open-webui`でカスタムブランドイメージを再ビルドする
 - litellmの`config.yaml`はボリュームマウント(`:ro`)のため、内容変更後は`docker compose restart litellm`で明示的に再起動する必要がある(`up -d`だけでは変更なしと判定され再作成されないことがある)
 - cloudflaredの断続的502問題(旧ホスト時代に発生)は新規トンネル作成で解消。現在は`--protocol http2`固定+watchdog(`dccai-cloudflared-watchdog.timer`、2分毎、**2026-08-21時点で稼働確認済み**)で保険をかけている
 
@@ -179,7 +179,7 @@ Discord OAuth(独自、Open WebUIとは別実装)でログインし、以下を�
 
 - **月間トークン上限値(1000万)が3箇所に分散している**: `dccai_pipe.py`のValve、`usage_page.py`の`MONTHLY_TOKEN_LIMIT`環境変数、`responses_gateway.py`の`MONTHLY_TOKEN_LIMIT`環境変数。**変更時は3箇所すべて揃えること**
 - litellmの`/spend/logs`フィルタ不具合は未解決(Postgres直接問い合わせで回避しているだけ)
-- Discord OAuth連携の`REQUIRED_GUILD_ID`等はusage_page.py側にも独自実装があり、Worker側の実装と重複している
+- Discord直接ログインの`REQUIRED_GUILD_ID`等はusage_page.py側にも独自実装がある。DCC Login経路はIdentity Workerが部員資格を検証し、usage側では`dcc_member`と専用`discord_id` claimをfail closedで再確認する
 
 ---
 
