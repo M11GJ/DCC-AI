@@ -2,6 +2,9 @@ FROM ghcr.io/open-webui/open-webui:v0.11.3
 COPY scripts/patch_open_webui_stream_close.py /tmp/patch_open_webui_stream_close.py
 RUN python3 /tmp/patch_open_webui_stream_close.py /app/backend/open_webui/functions.py && \
     rm -f /tmp/patch_open_webui_stream_close.py
+COPY scripts/patch_open_webui_auth_cache.py /tmp/patch_open_webui_auth_cache.py
+RUN python3 /tmp/patch_open_webui_auth_cache.py /app/backend/open_webui/utils/oauth.py && \
+    rm -f /tmp/patch_open_webui_auth_cache.py
 
 # v0.11.0のHTMLをWebViewやブラウザが保持していても、v0.11.3の同等entryを
 # 旧ハッシュ名で配信して更新直後の白画面を防ぐ。内容は常に現在のentryを使う。
