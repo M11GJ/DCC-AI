@@ -116,6 +116,13 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - RAGテンプレートとモデル接続設定の再適用は`bash /opt/dccai/scripts/apply_open_webui_rag.sh`。実体は`scripts/configure_open_webui_rag.py`で、実行前にOpen WebUI DBの手動バックアップを作成する
 - DCC DiscordナレッジはHigh/Lowへ接続。CodeとLocal 80Bは`meta.knowledge=[]`として明示的に未接続
 
+### 4.2 FIS MCP
+
+- 公開Streamable HTTP MCP `https://fis--gunn0511.shu-dcc.net/mcp`を、Tool Server ID `fis`としてOpen WebUIへ登録する
+- 全認証ユーザーへread grantを付与する。FIS MCPは匿名・読み取り専用で、DCC Login、保存済み履修情報、氏名・学籍番号へアクセスしない
+- DCC AIは`ENABLE_PERSISTENT_CONFIG=false`のため、登録元はDBではなく`open-webui.env`の`TOOL_SERVER_CONNECTIONS`。`scripts/configure_fis_mcp.py /opt/dccai/open-webui.env`で既存接続を保持したまま追加・検証する
+- 設定変更後はopen-webuiだけを`docker compose up -d --no-deps open-webui`で再作成する。モデルID、Pipe、LiteLLM、他サービスは変更しない
+
 反映方法: `dccai_pipe.py`を編集後、`bash /opt/dccai/scripts/sync_pipe_to_db.sh`でOpen WebUIのSQLite(`function`テーブル)へ書き込み+open-webui再起動が必要(ファイルを置くだけでは反映されない)。
 
 ---
