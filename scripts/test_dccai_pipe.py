@@ -348,6 +348,33 @@ class DccAiPipeTests(unittest.TestCase):
         with mock.patch.object(dccai_pipe.httpx, "AsyncClient", FakeAsyncClient):
             asyncio.run(scenario())
 
+    def test_stream_emits_thinking_status_before_first_content(self):
+        async def scenario():
+            events = []
+
+            async def emitter(event):
+                events.append(event)
+
+            stream = await self.pipe.pipe(
+                {
+                    "model": "dccai.dccai-low-vision",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                },
+                __user__={"id": "test-user"},
+                __metadata__={"chat_id": "chat-thinking-status"},
+                __event_emitter__=emitter,
+            )
+            self.assertIn("TEST", await asyncio.wait_for(anext(stream), 1))
+            self.assertGreaterEqual(len(events), 2)
+            self.assertEqual(events[0]["type"], "status")
+            self.assertEqual(events[0]["data"]["description"], "🧠 考えています…")
+            self.assertFalse(events[0]["data"]["done"])
+            await stream.aclose()
+
+        with mock.patch.object(dccai_pipe.httpx, "AsyncClient", FakeAsyncClient):
+            asyncio.run(scenario())
+
     def test_cancelled_waiter_does_not_corrupt_queue(self):
         async def new_stream(chat_id):
             return await self.pipe.pipe(

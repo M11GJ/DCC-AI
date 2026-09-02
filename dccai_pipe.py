@@ -1,7 +1,7 @@
 """
 title: DCC AI
 author: DCC
-version: 1.1.5
+version: 1.1.6
 license: MIT
 description: DCC部員向け DCC AI High/Low/Code/Local 80B。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
 requirements: httpx
@@ -753,6 +753,7 @@ class Pipe:
                 pending_lines = []
                 dsml_text = ""
                 stream_base = {}
+                await status("🧠 考えています…", False)
                 try:
                     async with _hold_group_slot(
                         state,
@@ -783,7 +784,7 @@ class Pipe:
                                         if not started:
                                             started = True
                                             count_high()
-                                            await status("✅ 生成を開始します。", True)
+                                            await status("🧠 思考内容を受信しています…", False)
                                         async for line in r.aiter_lines():
                                             if line:
                                                 chunk = None
@@ -909,6 +910,7 @@ class Pipe:
                                                                 ensure_ascii=False,
                                                                 separators=(",", ":"),
                                                             ) + "\n"
+                                                        await status("🔧 情報を確認します。", True)
                                                         yield "data: [DONE]\n"
                                                     continue
 
@@ -916,6 +918,9 @@ class Pipe:
                                                     for pending in pending_lines:
                                                         yield pending + "\n"
                                                     pending_lines = []
+
+                                                if data_str == "[DONE]":
+                                                    await status("✅ 回答を生成しました。", True)
 
                                                 if chunk is not None and is_api_call:
                                                     _strip_reasoning_fields(chunk)
@@ -947,6 +952,7 @@ class Pipe:
             return event_stream()
 
         # 非ストリーミング
+        await status("🧠 考えています…", False)
         try:
             async with _hold_group_slot(
                 state,
