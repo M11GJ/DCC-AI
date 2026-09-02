@@ -122,7 +122,7 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - 全認証ユーザーへread grantを付与する。FIS MCPは匿名・読み取り専用で、DCC Login、保存済み履修情報、氏名・学籍番号へアクセスしない
 - High/Lowの`meta.toolIds`へ`server:mcp:fis`を既定Toolとして設定し、FIS・履修・時間割・進級・卒業関連の質問だけ呼ぶようsystem promptでルーティングする
 - DCC AIは`ENABLE_PERSISTENT_CONFIG=false`のため、登録元はDBではなく`open-webui.env`の`TOOL_SERVER_CONNECTIONS`。`scripts/configure_fis_mcp.py /opt/dccai/open-webui.env`で既存接続を保持したまま追加・検証する
-- 送信直後の待機表示はPipeが`🧠 考えています…`として即時通知する。受信した推論内容はWeb画面の折りたたみ欄に逐次表示し、既定では展開しない。外部APIでは従来どおり推論フィールドを返さない
+- 送信直後の待機表示はPipeが`🧠 考えています…`として即時通知する。受信した推論内容はWeb画面の折りたたみ欄に逐次表示し、既定では展開しない。DSML判定中も`reasoning_content`は保留せず、`content`の先頭候補だけを保留する。外部APIでは従来どおり推論フィールドを返さない
 - 設定変更後はopen-webuiだけを`docker compose up -d --no-deps open-webui`で再作成する。モデルID、Pipe、LiteLLM、他サービスは変更しない
 
 反映方法: `dccai_pipe.py`を編集後、`bash /opt/dccai/scripts/sync_pipe_to_db.sh`でOpen WebUIのSQLite(`function`テーブル)へ書き込み+open-webui再起動が必要(ファイルを置くだけでは反映されない)。

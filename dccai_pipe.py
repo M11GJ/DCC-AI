@@ -1,7 +1,7 @@
 """
 title: DCC AI
 author: DCC
-version: 1.1.6
+version: 1.1.7
 license: MIT
 description: DCC部員向け DCC AI High/Low/Code/Local 80B。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
 requirements: httpx
@@ -789,6 +789,7 @@ class Pipe:
                                             if line:
                                                 chunk = None
                                                 data_str = ""
+                                                forward_line = line
                                                 if line.startswith("data:"):
                                                     data_str = line[5:].strip()
                                                     if data_str and data_str != "[DONE]":
@@ -800,6 +801,17 @@ class Pipe:
                                                                 captured_usage = chunk_usage
                                                         except Exception:
                                                             chunk = None
+
+                                                # External Chat API responses deliberately hide provider
+                                                # reasoning. Do this before any early-yield path so the
+                                                # DSML prefix detector cannot accidentally bypass it.
+                                                if chunk is not None and is_api_call:
+                                                    _strip_reasoning_fields(chunk)
+                                                    forward_line = "data: " + json.dumps(
+                                                        chunk,
+                                                        ensure_ascii=False,
+                                                        separators=(",", ":"),
+                                                    )
 
                                                 if chunk is not None and not stream_base:
                                                     stream_base = {
@@ -814,11 +826,15 @@ class Pipe:
                                                     }
 
                                                 if stream_mode == "undecided" and chunk is not None:
-                                                    pending_lines.append(line)
                                                     choice = (chunk.get("choices") or [{}])[0]
                                                     delta = choice.get("delta") or {}
                                                     content = delta.get("content")
-                                                    if isinstance(content, str):
+                                                    if isinstance(content, str) and content:
+                                                        # Only normal content can contain DeepSeek's raw
+                                                        # DSML prefix. Reasoning/role/usage chunks must flow
+                                                        # immediately or the whole thought stream appears at
+                                                        # once when final answer content begins.
+                                                        pending_lines.append(forward_line)
                                                         dsml_text += content
                                                         prefix_state = _dsml_prefix_state(dsml_text)
                                                         if prefix_state == "prefix":
@@ -828,8 +844,10 @@ class Pipe:
                                                             continue
                                                         stream_mode = "plain"
                                                     elif delta.get("tool_calls") or choice.get("finish_reason") is not None:
+                                                        pending_lines.append(forward_line)
                                                         stream_mode = "plain"
                                                     else:
+                                                        yield forward_line + "\n"
                                                         continue
 
                                                     for pending in pending_lines:
@@ -922,12 +940,7 @@ class Pipe:
                                                 if data_str == "[DONE]":
                                                     await status("✅ 回答を生成しました。", True)
 
-                                                if chunk is not None and is_api_call:
-                                                    _strip_reasoning_fields(chunk)
-                                                    line = "data: " + json.dumps(
-                                                        chunk, ensure_ascii=False, separators=(",", ":")
-                                                    )
-                                                yield line + "\n"
+                                                yield forward_line + "\n"
                                         return
                                 except (
                                     httpx.ConnectError,

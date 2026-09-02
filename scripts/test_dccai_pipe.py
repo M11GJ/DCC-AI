@@ -375,6 +375,141 @@ class DccAiPipeTests(unittest.TestCase):
         with mock.patch.object(dccai_pipe.httpx, "AsyncClient", FakeAsyncClient):
             asyncio.run(scenario())
 
+    def test_reasoning_stream_is_forwarded_before_final_content(self):
+        content_gate = asyncio.Event()
+
+        class ReasoningResponse:
+            status_code = 200
+
+            async def aiter_lines(self):
+                yield 'data: {"choices":[{"delta":{"role":"assistant"}}]}'
+                yield 'data: {"choices":[{"delta":{"reasoning_content":"STEP"}}]}'
+                await content_gate.wait()
+                yield 'data: {"choices":[{"delta":{"content":"ANSWER"}}]}'
+                yield "data: [DONE]"
+
+        class ReasoningContext:
+            async def __aenter__(self):
+                return ReasoningResponse()
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class ReasoningClient(FakeAsyncClient):
+            def stream(self, *args, **kwargs):
+                return ReasoningContext()
+
+        async def scenario():
+            stream = await self.pipe.pipe(
+                {
+                    "model": "dccai.dccai-low-vision",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                },
+                __user__={"id": "test-user"},
+                __metadata__={"chat_id": "chat-live-reasoning"},
+            )
+            self.assertIn('"role":"assistant"', await asyncio.wait_for(anext(stream), 1))
+            reasoning_line = await asyncio.wait_for(anext(stream), 1)
+            self.assertIn('"reasoning_content":"STEP"', reasoning_line)
+            content_gate.set()
+            self.assertIn('"content":"ANSWER"', await asyncio.wait_for(anext(stream), 1))
+            await stream.aclose()
+
+        with mock.patch.object(dccai_pipe.httpx, "AsyncClient", ReasoningClient):
+            asyncio.run(scenario())
+
+    def test_chat_api_still_hides_live_reasoning(self):
+        class ApiResponse:
+            status_code = 200
+
+            async def aiter_lines(self):
+                yield 'data: {"choices":[{"delta":{"reasoning_content":"PRIVATE"}}]}'
+                yield 'data: {"choices":[{"delta":{"content":"ANSWER"}}]}'
+                yield "data: [DONE]"
+
+        class ApiContext:
+            async def __aenter__(self):
+                return ApiResponse()
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class ApiClient(FakeAsyncClient):
+            def stream(self, *args, **kwargs):
+                return ApiContext()
+
+        async def scenario():
+            stream = await self.pipe.pipe(
+                {
+                    "model": "dccai.dccai-low-vision",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                },
+                __user__={"id": "test-user"},
+                __metadata__={},
+            )
+            reasoning_line = await asyncio.wait_for(anext(stream), 1)
+            self.assertNotIn("reasoning_content", reasoning_line)
+            self.assertNotIn("PRIVATE", reasoning_line)
+            self.assertIn('"content":"ANSWER"', await asyncio.wait_for(anext(stream), 1))
+            await stream.aclose()
+
+        with mock.patch.object(dccai_pipe.httpx, "AsyncClient", ApiClient):
+            asyncio.run(scenario())
+
+    def test_reasoning_streams_while_raw_dsml_stays_buffered(self):
+        class DsmlResponse:
+            status_code = 200
+
+            async def aiter_lines(self):
+                yield 'data: {"choices":[{"delta":{"reasoning_content":"STEP"}}]}'
+                for content in (
+                    "<",
+                    "｜｜DSML｜｜tool_calls>",
+                    '<｜｜DSML｜｜invoke name="search_knowledge_bases" />',
+                    "</｜｜DSML｜｜tool_calls>",
+                ):
+                    yield "data: " + json.dumps(
+                        {"choices": [{"delta": {"content": content}}]},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                yield "data: [DONE]"
+
+        class DsmlContext:
+            async def __aenter__(self):
+                return DsmlResponse()
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class DsmlClient(FakeAsyncClient):
+            def stream(self, *args, **kwargs):
+                return DsmlContext()
+
+        async def scenario():
+            stream = await self.pipe.pipe(
+                {
+                    "model": "dccai.dccai-low-vision",
+                    "messages": [{"role": "user", "content": "DCC Discordを検索"}],
+                    "stream": True,
+                },
+                __user__={"id": "test-user"},
+                __metadata__={"chat_id": "chat-dsml-reasoning"},
+            )
+            lines = []
+            async for line in stream:
+                lines.append(line)
+            combined = "".join(lines)
+            self.assertIn('"reasoning_content":"STEP"', lines[0])
+            self.assertNotIn("DSML", combined)
+            self.assertIn('"tool_calls"', combined)
+            self.assertIn("search_knowledge_bases", combined)
+
+        with mock.patch.object(dccai_pipe.httpx, "AsyncClient", DsmlClient):
+            asyncio.run(scenario())
+
     def test_cancelled_waiter_does_not_corrupt_queue(self):
         async def new_stream(chat_id):
             return await self.pipe.pipe(
