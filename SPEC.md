@@ -114,12 +114,13 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - Web検索はOpen WebUI → SearXNG(`http://searxng:8080`)で実行し、取得結果を`<source resource-type="web_search">`形式のRAGコンテキストとしてPipeへ渡す
 - 永続設定`config.rag.template`には元の質問を`{{QUERY}}`で必ず含める。Web検索ソースが存在する場合は「このリクエストでDCC AIの検索機能が実行済み」とモデルへ明示し、検索不能という定型的な断りを返させない
 - RAGテンプレートとモデル接続設定の再適用は`bash /opt/dccai/scripts/apply_open_webui_rag.sh`。実体は`scripts/configure_open_webui_rag.py`で、実行前にOpen WebUI DBの手動バックアップを作成する
-- DCC DiscordナレッジはHigh/Lowへ接続。CodeとLocal 80Bは`meta.knowledge=[]`として明示的に未接続
+- DCC Discordナレッジは全認証ユーザーへread grantを付与し、High/Lowを含む全モデルで`meta.knowledge=[]`とする。モデルへの常時添付は行わず、High/Lowのsystem promptでDCC関連時だけOpen WebUI内蔵knowledge toolを呼び、FIS・履修判定・一般質問では呼ばないようルーティングする
 
 ### 4.2 FIS MCP
 
 - 公開Streamable HTTP MCP `https://fis--gunn0511.shu-dcc.net/mcp`を、Tool Server ID `fis`としてOpen WebUIへ登録する
 - 全認証ユーザーへread grantを付与する。FIS MCPは匿名・読み取り専用で、DCC Login、保存済み履修情報、氏名・学籍番号へアクセスしない
+- High/Lowの`meta.toolIds`へ`server:mcp:fis`を既定Toolとして設定し、FIS・履修・時間割・進級・卒業関連の質問だけ呼ぶようsystem promptでルーティングする
 - DCC AIは`ENABLE_PERSISTENT_CONFIG=false`のため、登録元はDBではなく`open-webui.env`の`TOOL_SERVER_CONNECTIONS`。`scripts/configure_fis_mcp.py /opt/dccai/open-webui.env`で既存接続を保持したまま追加・検証する
 - 設定変更後はopen-webuiだけを`docker compose up -d --no-deps open-webui`で再作成する。モデルID、Pipe、LiteLLM、他サービスは変更しない
 

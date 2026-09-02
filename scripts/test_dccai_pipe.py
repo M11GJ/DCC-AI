@@ -2,6 +2,7 @@
 """Unit tests for DCC AI Pipe model exposure and Local 80B policy."""
 
 import asyncio
+import json
 import pathlib
 import sys
 import unittest
@@ -59,6 +60,183 @@ class DccAiPipeTests(unittest.TestCase):
         self.assertTrue(local["meta"]["capabilities"]["web_search"])
         self.assertTrue(local["meta"]["capabilities"]["builtin_tools"])
         self.assertEqual(self.pipe.valves.LOCAL_MAX_CONCURRENCY, 1)
+
+    def test_dsml_tool_call_is_normalized_for_chat_completions(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '<｜DSML｜tool_calls><｜DSML｜invoke name="query_knowledge_bases">'
+                            '<｜DSML｜parameter name="query" string="true">DCC Discord 活動'
+                            '</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>'
+                        ),
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "query_knowledge_bases", "parameters": {}},
+                }
+            ]
+        }
+
+        self.assertTrue(dccai_pipe._normalize_chat_dsml_response(response, payload))
+        choice = response["choices"][0]
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertIsNone(choice["message"]["content"])
+        call = choice["message"]["tool_calls"][0]
+        self.assertEqual(call["function"]["name"], "query_knowledge_bases")
+        self.assertEqual(json.loads(call["function"]["arguments"]), {"query": "DCC Discord 活動"})
+
+    def test_double_bar_dsml_tool_call_is_normalized(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '<｜｜DSML｜｜tool_calls>\n'
+                            '<｜｜DSML｜｜invoke name="search_knowledge_bases">\n'
+                            '<｜｜DSML｜｜parameter name="query" string="true">DCC Discord 活動'
+                            '</｜｜DSML｜｜parameter>\n'
+                            '</｜｜DSML｜｜invoke>\n'
+                            '</｜｜DSML｜｜tool_calls>'
+                        ),
+                    },
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "search_knowledge_bases"},
+                }
+            ]
+        }
+
+        self.assertTrue(dccai_pipe._normalize_chat_dsml_response(response, payload))
+        call = response["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(call["function"]["name"], "search_knowledge_bases")
+        self.assertEqual(json.loads(call["function"]["arguments"]), {"query": "DCC Discord 活動"})
+
+    def test_dsml_tool_name_resolves_to_open_webui_prefix(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '<｜｜DSML｜｜tool_calls>'
+                            '<｜｜DSML｜｜invoke name="search_knowledge_bases">'
+                            '<｜｜DSML｜｜parameter name="query" string="true">DCC'
+                            '</｜｜DSML｜｜parameter>'
+                            '</｜｜DSML｜｜invoke>'
+                            '</｜｜DSML｜｜tool_calls>'
+                        ),
+                    }
+                }
+            ]
+        }
+        payload = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "builtin__search_knowledge_bases"},
+                }
+            ]
+        }
+
+        self.assertTrue(dccai_pipe._normalize_chat_dsml_response(response, payload))
+        call = response["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(call["function"]["name"], "builtin__search_knowledge_bases")
+
+    def test_known_builtin_dsml_tool_is_allowed_when_native_tools_are_omitted(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '<｜｜DSML｜｜tool_calls>'
+                            '<｜｜DSML｜｜invoke name="query_knowledge_bases">'
+                            '<｜｜DSML｜｜parameter name="query" string="true">DCC'
+                            '</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>'
+                            '</｜｜DSML｜｜tool_calls>'
+                        ),
+                    }
+                }
+            ]
+        }
+
+        self.assertTrue(dccai_pipe._normalize_chat_dsml_response(response, {}))
+        call = response["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(call["function"]["name"], "query_knowledge_bases")
+
+    def test_unknown_dsml_tool_is_rejected_when_native_tools_are_omitted(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '<｜DSML｜tool_calls><｜DSML｜invoke name="delete_everything">'
+                            '</｜DSML｜invoke></｜DSML｜tool_calls>'
+                        ),
+                    }
+                }
+            ]
+        }
+
+        self.assertFalse(dccai_pipe._normalize_chat_dsml_response(response, {}))
+        self.assertNotIn("tool_calls", response["choices"][0]["message"])
+
+    def test_self_closing_knowledge_call_uses_last_user_text_as_query(self):
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            '<｜｜DSML｜｜tool_calls>\n'
+                            '<｜｜DSML｜｜invoke name="search_knowledge_bases" />\n'
+                            '</｜｜DSML｜｜tool_calls>'
+                        ),
+                    }
+                }
+            ]
+        }
+        payload = {
+            "messages": [
+                {"role": "system", "content": "routing"},
+                {"role": "user", "content": "DCC Discordの活動を教えて"},
+            ]
+        }
+
+        self.assertTrue(dccai_pipe._normalize_chat_dsml_response(response, payload))
+        call = response["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(
+            json.loads(call["function"]["arguments"]),
+            {"query": "DCC Discordの活動を教えて"},
+        )
+
+    def test_stream_prefix_detects_dsml_without_delaying_plain_text(self):
+        self.assertEqual(dccai_pipe._dsml_prefix_state("<｜DS"), "prefix")
+        self.assertEqual(
+            dccai_pipe._dsml_prefix_state("<｜DSML｜tool_calls>"), "dsml"
+        )
+        self.assertEqual(dccai_pipe._dsml_prefix_state("<｜｜DS"), "prefix")
+        self.assertEqual(
+            dccai_pipe._dsml_prefix_state("<｜｜DSML｜｜tool_calls>"), "dsml"
+        )
+        self.assertEqual(dccai_pipe._dsml_prefix_state("通常の回答です"), "plain")
 
     def test_local_model_is_rejected_for_chat_api_calls(self):
         result = asyncio.run(

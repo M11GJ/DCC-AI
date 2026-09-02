@@ -1,7 +1,7 @@
 """
 title: DCC AI
 author: DCC
-version: 1.1.1
+version: 1.1.5
 license: MIT
 description: DCC部員向け DCC AI High/Low/Code/Local 80B。順番待ちUI・High日次上限つきで LiteLLM 経由で中継。
 requirements: httpx
@@ -13,7 +13,9 @@ import os
 import re
 import base64
 import glob
+import html
 import mimetypes
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Awaitable, Any
@@ -52,6 +54,181 @@ def _strip_reasoning_fields(value):
         for child in value:
             _strip_reasoning_fields(child)
     return value
+
+
+_DSML = r"[|｜]{1,2}DSML[|｜]{1,2}"
+_DSML_BLOCK_RE = re.compile(
+    rf"<{_DSML}tool_calls>(.*?)</{_DSML}tool_calls>", re.DOTALL
+)
+_DSML_INVOKE_RE = re.compile(
+    rf"<{_DSML}invoke\s+name=\"([^\"]+)\"\s*(?:>(.*?)</{_DSML}invoke>|/>)",
+    re.DOTALL,
+)
+_DSML_PARAM_RE = re.compile(
+    rf"<{_DSML}parameter\s+name=\"([^\"]+)\"\s+string=\"(true|false)\"\s*>(.*?)</{_DSML}parameter>",
+    re.DOTALL,
+)
+_DSML_START_MARKERS = tuple(
+    f"<{left * left_count}DSML{right * right_count}tool_calls>"
+    for left in ("|", "｜")
+    for right in ("|", "｜")
+    for left_count in (1, 2)
+    for right_count in (1, 2)
+)
+_SAFE_DSML_FALLBACK_TOOLS = {
+    "list_knowledge_bases",
+    "search_knowledge_bases",
+    "query_knowledge_bases",
+    "grep_knowledge_files",
+    "search_knowledge_files",
+    "query_knowledge_files",
+    "view_knowledge_file",
+}
+_DSML_QUERY_TOOLS = {
+    "search_knowledge_bases",
+    "query_knowledge_bases",
+    "grep_knowledge_files",
+    "search_knowledge_files",
+    "query_knowledge_files",
+}
+
+
+def _extract_dsml_tool_calls(text: str):
+    """Return cleaned text and DeepSeek DSML tool calls."""
+    blocks = list(_DSML_BLOCK_RE.finditer(text))
+    if not blocks:
+        return text, []
+
+    calls = []
+    for block in blocks:
+        invokes = list(_DSML_INVOKE_RE.finditer(block.group(1)))
+        if not invokes:
+            raise ValueError("DSML tool_calls block has no invoke")
+        for invoke in invokes:
+            name = html.unescape(invoke.group(1))
+            arguments = {}
+            for match in _DSML_PARAM_RE.finditer(invoke.group(2) or ""):
+                key = html.unescape(match.group(1))
+                if key in arguments:
+                    raise ValueError(f"duplicate DSML parameter: {key}")
+                raw_value = html.unescape(match.group(3))
+                arguments[key] = raw_value if match.group(2) == "true" else json.loads(raw_value)
+            calls.append({"name": name, "arguments": arguments})
+
+    return _DSML_BLOCK_RE.sub("", text).strip(), calls
+
+
+def _request_tool_names(payload: dict) -> set[str]:
+    names = set()
+    for tool in payload.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if tool.get("type") == "function" and isinstance(function, dict):
+            name = function.get("name")
+        else:
+            name = tool.get("name")
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def _last_user_text(payload: dict) -> str:
+    for message in reversed(payload.get("messages") or []):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = [
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            return "\n".join(part for part in parts if part).strip()
+    return ""
+
+
+def _resolve_dsml_tool_name(name: str, allowed_names: set[str]) -> Optional[str]:
+    """Resolve a DSML name to the exact tool name exposed by Open WebUI."""
+    if name in allowed_names:
+        return name
+    # Open WebUI v0.11.x may inject builtin knowledge instructions into the
+    # conversation while omitting the native `tools` array passed to a Pipe.
+    # Only these read-only builtin names are safe to recover in that case.
+    if not allowed_names and name in _SAFE_DSML_FALLBACK_TOOLS:
+        return name
+    suffixes = (f"__{name}", f".{name}", f"/{name}")
+    matches = [
+        candidate
+        for candidate in allowed_names
+        if any(candidate.endswith(suffix) for suffix in suffixes)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _normalize_chat_dsml_response(response: dict, request_payload: dict) -> bool:
+    """Convert leaked DeepSeek DSML into standard Chat Completions tool_calls."""
+    allowed_names = _request_tool_names(request_payload)
+    converted = False
+    for choice in response.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or "DSML" not in content:
+            continue
+        try:
+            cleaned, calls = _extract_dsml_tool_calls(content)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if not calls:
+            continue
+        user_query = _last_user_text(request_payload)
+        for call in calls:
+            if (
+                call["name"] in _DSML_QUERY_TOOLS
+                and "query" not in call["arguments"]
+                and user_query
+            ):
+                call["arguments"]["query"] = user_query
+        resolved_names = [
+            _resolve_dsml_tool_name(call["name"], allowed_names) for call in calls
+        ]
+        if any(name is None for name in resolved_names):
+            continue
+        for call, resolved_name in zip(calls, resolved_names):
+            call["name"] = resolved_name
+        message["content"] = cleaned or None
+        message["tool_calls"] = [
+            {
+                "id": f"call_dsml_{uuid.uuid4().hex}",
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": json.dumps(
+                        call["arguments"], ensure_ascii=False, separators=(",", ":")
+                    ),
+                },
+            }
+            for call in calls
+        ]
+        choice["finish_reason"] = "tool_calls"
+        converted = True
+    return converted
+
+
+def _dsml_prefix_state(text: str) -> str:
+    """Return prefix, dsml, or plain while the first streamed content is buffered."""
+    candidate = text.lstrip()
+    if any(candidate.startswith(marker) for marker in _DSML_START_MARKERS):
+        return "dsml"
+    if any(marker.startswith(candidate) for marker in _DSML_START_MARKERS):
+        return "prefix"
+    return "plain"
 
 
 def _get_group_state(group: str, cap: int) -> dict:
@@ -568,6 +745,14 @@ class Pipe:
                 waited = 0.0
                 started = False
                 captured_tokens = 0
+                captured_usage = None
+                # Open WebUI v0.11.x can omit the native `tools` array for
+                # builtin knowledge while still instructing the model to emit
+                # DSML. Always inspect only the initial content prefix.
+                stream_mode = "undecided"
+                pending_lines = []
+                dsml_text = ""
+                stream_base = {}
                 try:
                     async with _hold_group_slot(
                         state,
@@ -601,6 +786,8 @@ class Pipe:
                                             await status("✅ 生成を開始します。", True)
                                         async for line in r.aiter_lines():
                                             if line:
+                                                chunk = None
+                                                data_str = ""
                                                 if line.startswith("data:"):
                                                     data_str = line[5:].strip()
                                                     if data_str and data_str != "[DONE]":
@@ -609,13 +796,132 @@ class Pipe:
                                                             chunk_usage = chunk.get("usage")
                                                             if chunk_usage and chunk_usage.get("total_tokens"):
                                                                 captured_tokens = chunk_usage["total_tokens"]
-                                                            if is_api_call:
-                                                                _strip_reasoning_fields(chunk)
-                                                                line = "data: " + json.dumps(
-                                                                    chunk, ensure_ascii=False, separators=(",", ":")
-                                                                )
+                                                                captured_usage = chunk_usage
                                                         except Exception:
-                                                            pass
+                                                            chunk = None
+
+                                                if chunk is not None and not stream_base:
+                                                    stream_base = {
+                                                        key: chunk.get(key)
+                                                        for key in (
+                                                            "id",
+                                                            "created",
+                                                            "model",
+                                                            "system_fingerprint",
+                                                        )
+                                                        if chunk.get(key) is not None
+                                                    }
+
+                                                if stream_mode == "undecided" and chunk is not None:
+                                                    pending_lines.append(line)
+                                                    choice = (chunk.get("choices") or [{}])[0]
+                                                    delta = choice.get("delta") or {}
+                                                    content = delta.get("content")
+                                                    if isinstance(content, str):
+                                                        dsml_text += content
+                                                        prefix_state = _dsml_prefix_state(dsml_text)
+                                                        if prefix_state == "prefix":
+                                                            continue
+                                                        if prefix_state == "dsml":
+                                                            stream_mode = "dsml"
+                                                            continue
+                                                        stream_mode = "plain"
+                                                    elif delta.get("tool_calls") or choice.get("finish_reason") is not None:
+                                                        stream_mode = "plain"
+                                                    else:
+                                                        continue
+
+                                                    for pending in pending_lines:
+                                                        yield pending + "\n"
+                                                    pending_lines = []
+                                                    continue
+
+                                                if stream_mode == "dsml":
+                                                    if chunk is not None:
+                                                        choice = (chunk.get("choices") or [{}])[0]
+                                                        content = (choice.get("delta") or {}).get("content")
+                                                        if isinstance(content, str):
+                                                            dsml_text += content
+                                                    if data_str == "[DONE]":
+                                                        normalized = {
+                                                            "choices": [
+                                                                {
+                                                                    "index": 0,
+                                                                    "message": {
+                                                                        "role": "assistant",
+                                                                        "content": dsml_text,
+                                                                    },
+                                                                    "finish_reason": None,
+                                                                }
+                                                            ]
+                                                        }
+                                                        if _normalize_chat_dsml_response(normalized, payload):
+                                                            message = normalized["choices"][0]["message"]
+                                                            delta = {
+                                                                "role": "assistant",
+                                                                "content": message.get("content"),
+                                                                "tool_calls": message.get("tool_calls"),
+                                                            }
+                                                            synthetic = {
+                                                                **stream_base,
+                                                                "object": "chat.completion.chunk",
+                                                                "choices": [
+                                                                    {
+                                                                        "index": 0,
+                                                                        "delta": delta,
+                                                                        "finish_reason": "tool_calls",
+                                                                    }
+                                                                ],
+                                                            }
+                                                            yield "data: " + json.dumps(
+                                                                synthetic,
+                                                                ensure_ascii=False,
+                                                                separators=(",", ":"),
+                                                            ) + "\n"
+                                                            if captured_usage:
+                                                                yield "data: " + json.dumps(
+                                                                    {
+                                                                        **stream_base,
+                                                                        "object": "chat.completion.chunk",
+                                                                        "choices": [],
+                                                                        "usage": captured_usage,
+                                                                    },
+                                                                    ensure_ascii=False,
+                                                                    separators=(",", ":"),
+                                                                ) + "\n"
+                                                        else:
+                                                            fallback = {
+                                                                **stream_base,
+                                                                "object": "chat.completion.chunk",
+                                                                "choices": [
+                                                                    {
+                                                                        "index": 0,
+                                                                        "delta": {
+                                                                            "role": "assistant",
+                                                                            "content": dsml_text,
+                                                                        },
+                                                                        "finish_reason": "stop",
+                                                                    }
+                                                                ],
+                                                            }
+                                                            yield "data: " + json.dumps(
+                                                                fallback,
+                                                                ensure_ascii=False,
+                                                                separators=(",", ":"),
+                                                            ) + "\n"
+                                                        yield "data: [DONE]\n"
+                                                    continue
+
+                                                if stream_mode == "undecided" and data_str == "[DONE]":
+                                                    for pending in pending_lines:
+                                                        yield pending + "\n"
+                                                    pending_lines = []
+
+                                                if chunk is not None and is_api_call:
+                                                    _strip_reasoning_fields(chunk)
+                                                    line = "data: " + json.dumps(
+                                                        chunk, ensure_ascii=False, separators=(",", ":")
+                                                    )
                                                 yield line + "\n"
                                         return
                                 except (
@@ -663,6 +969,7 @@ class Pipe:
                         if r.status_code != 200:
                             return f"Error {r.status_code}: {r.text}"
                         resp_json = r.json()
+                        _normalize_chat_dsml_response(resp_json, payload)
                         if is_api_call:
                             _strip_reasoning_fields(resp_json)
                         usage = resp_json.get("usage") or {}
