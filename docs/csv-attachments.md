@@ -1,0 +1,7 @@
+# CSV attachment handling (2026-09-15)
+
+Fixed the Pipe attachment expansion that sent every uploaded file as an image. CSV files now expand as text with the filename preserved. Supported decoding: UTF-8 with or without BOM, CP932 (Windows Shift_JIS), and BOM-marked UTF-16. Original commas, quoting, and line breaks are retained. Each CSV is limited to 8 MiB; the model context limit still applies. Missing files, invalid encoding, and excessive size produce explicit guidance rather than silently omitting data. Other documents retain their native tool references; PNG/JPEG/WebP/GIF attachments retain image handling.
+
+Validation: 5 new attachment tests, 21 Pipe regressions, 7 public-error tests, and 5 native-tool recovery tests passed. Production upload API followed by chat completion using the native attached_files representation returned sum 350 and the exact multiline Japanese cell for both UTF-8 BOM and CP932 synthetic CSV files. The browser file chooser could not be automated because Chrome denied file access; the separate session/socket-style test did not complete and ended on a connection reset. Do not describe these as a completed browser upload test.
+
+Deployed through the function update API (updates runtime cache), preserving existing function metadata and valves; /opt/dccai/dccai_pipe.py synchronized. Initial source backup: /opt/dccai-backups/csv-20260915/dccai_pipe.py. Original function row backup (including private configuration, server only): /app/backend/data/dccai-function-before-csv-20260915.json. Existing local changes were retained.

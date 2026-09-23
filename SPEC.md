@@ -100,10 +100,10 @@ Open WebUIのカスタムFunction(Pipe)。litellmへの中継に加え、以下�
 - **停止時の解放**: ストリーム本体の中で枠を取得し、停止・切断・例外・待機キャンセル時は`finally`で必ず解放する。Open WebUI本体のPipeラッパーも内側のasync generatorへ`aclose()`を伝播し、待機は最大180秒で終了する
 - **WebUI限定運用**: Local 80Bは認証済みの一般ユーザーを含む全DCCユーザーへ公開する。APIドキュメント・接続案内には掲載せず、Responses APIでは完全一致allowlistから除外する。Chat APIの通常呼び出し(`__metadata__.chat_id`なし)も上流へ送らず拒否するが、これは強固な認可境界ではなく非公開運用上のガードとする
 - **High日次上限**: `HIGH_DAILY_LIMIT`(既定20回/日)、`USAGE_FILE`にflock付きread-modify-writeで記録
-- **月間トークン上限**: `MONTHLY_TOKEN_LIMIT`(既定1000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。`TOKEN_USAGE_FILE`(`/app/backend/data/dcc_ai_token_usage.json`)にflock付きで記録・判定
+- **月間トークン上限**: 通常API(High/Low/Code)は`MONTHLY_TOKEN_LIMIT`(既定1500万トークン/月)、Jevは別枠の`JEV_MONTHLY_TOKEN_LIMIT`(既定5000万トークン/月)。**API経由の呼び出しのみが対象、WebUIチャットは対象外**。通常APIは`dcc_ai_token_usage.json`、Jevは`dcc_ai_jev_token_usage.json`へflock付きで分離記録・判定する
   - WebUI呼び出しとAPI呼び出しの区別は`__metadata__.chat_id`の有無で判定(`is_api_call`)
   - litellm側の集計用`user`フィールドも`<user_id>:api`(API)/`<user_id>`(WebUI)で分離
-  - モデル更新等で枠だけをリセットする場合は`scripts/reset_monthly_token_limit.py`をOpen WebUIコンテナ内で実行する。Postgresの全利用記録は残し、リセット前カウンターをJSONL監査ログとスナップショットへ保存したうえで現在枠だけ0にする。使用量ページは「総記録」と「現在の制限枠」を分けて表示する
+  - モデル更新等で枠だけをリセットする場合は`scripts/reset_monthly_token_limit.py`をOpen WebUIコンテナ内で実行する。Postgres/Jev JSONLの全利用記録は残し、通常APIとJev双方のリセット前カウンターをJSONL監査ログとスナップショットへ保存したうえで現在枠だけ0にする。使用量ページは「総記録」と通常/Jevの「現在の制限枠」を分けて表示する
 - **時刻基準**: High日次上限・API月間上限はどちらもJST(Asia/Tokyo)の暦日・暦月で判定
 - **画像処理**: High/Low/Codeは画像を`image_url`形式のまま直接渡す。Local 80Bは`vision=false`で、画像が含まれる場合は上流へ送らず非対応を案内
 - **API互換オプション**: `tools`/`tool_choice`/`response_format`/`stop`等の主要Chat Completions指定をLiteLLMへ転送する
@@ -168,7 +168,7 @@ Discord OAuth(独自、Open WebUIとは別実装)またはDCC Login(OIDC Authori
 - **ランキング(`/ranking`)**: 今月の消費ランキング(WebUI+API合算)、全体の合計ランキング
 - **管理者ページ(`/admin`、role=admin限定)**: 日別ランキング(JST暦日)、**今月のAPI利用状況を全ユーザー分バー表示**、モデル別グラフ・テーブル、WebUI/API内訳テーブル
 
-**データソース**: litellmの`/spend/logs` REST APIは`limit`/`end_user_id`フィルタが機能せず(既知の欠陥、原因未特定)、全件(数万行・90MB超)を返し9〜14秒かかっていたため、**同じdocker network上のPostgres(`LiteLLM_SpendLogs`テーブル)へ`psycopg2`で直接SQL問い合わせ**する方式に変更済み(0.1秒未満)。月次集計は**JST暦月**で統一(日別ランキングもJSTのため)。litellm自体のヘルスチェック(`/health/readiness`)は2026-08-21時点`{"status":"healthy","db":"connected"}`で正常。
+**データソース**: litellmの`/spend/logs` REST APIは`limit`/`end_user_id`フィルタが機能せず(既知の欠陥、原因未特定)、全件(数万行・90MB超)を返し9〜14秒かかっていたため、**同じdocker network上のPostgres(`LiteLLM_SpendLogs`テーブル)へ`psycopg2`で直接SQL問い合わせ**する方式に変更済み(0.1秒未満)。LiteLLMを通らないJevは、本文や回答を保存せず、ユーザーID・時刻・実モデル・入出力/合計トークン・費用だけを`dcc_ai_jev_usage.jsonl`へ追記し、同じ画面集計へ統合する。月次集計は**JST暦月**で統一(日別ランキングもJSTのため)。litellm自体のヘルスチェック(`/health/readiness`)は2026-08-21時点`{"status":"healthy","db":"connected"}`で正常。
 
 **罠**: SQLに`LIKE '%...'`のようなリテラル`%`を含める場合、`psycopg2`のプレースホルダー解析と衝突するため`%%`にエスケープが必要。
 
@@ -187,7 +187,7 @@ Discord OAuth(独自、Open WebUIとは別実装)またはDCC Login(OIDC Authori
 
 ## 9. 既知の課題・重複設定
 
-- **月間トークン上限値(1000万)が3箇所に分散している**: `dccai_pipe.py`のValve、`usage_page.py`の`MONTHLY_TOKEN_LIMIT`環境変数、`responses_gateway.py`の`MONTHLY_TOKEN_LIMIT`環境変数。**変更時は3箇所すべて揃えること**
+- **通常APIの月間上限値(1500万)が3箇所に分散している**: `dccai_pipe.py`のValve、`usage_page.py`の`MONTHLY_TOKEN_LIMIT`環境変数、`responses_gateway.py`の`MONTHLY_TOKEN_LIMIT`環境変数。**変更時は3箇所すべて揃えること**。Jevの別枠上限(5000万)は`usage_page.py`と`responses_gateway.py`の`JEV_MONTHLY_TOKEN_LIMIT`を揃える
 - litellmの`/spend/logs`フィルタ不具合は未解決(Postgres直接問い合わせで回避しているだけ)
 - Discord直接ログインの`REQUIRED_GUILD_ID`等はusage_page.py側にも独自実装がある。DCC Login経路はIdentity Workerが部員資格を検証し、usage側では`dcc_member`と専用`discord_id` claimをfail closedで再確認する
 

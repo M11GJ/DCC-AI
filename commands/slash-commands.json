@@ -1,0 +1,18 @@
+[
+  {
+    "command": "/plan",
+    "name": "計画を立てる",
+    "content": "DCC_COMMAND:plan",
+    "meta": {
+      "dcc_command": true
+    }
+  },
+  {
+    "command": "/grill-me",
+    "name": "質問で要件を掘り下げる",
+    "content": "DCC_COMMAND:grill-me",
+    "meta": {
+      "dcc_command": true
+    }
+  }
+]

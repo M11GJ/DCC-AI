@@ -51,6 +51,25 @@ class DccAiPipeTests(unittest.TestCase):
         self.pipe.valves.LITELLM_API_KEY = "test-key"
         self.pipe.valves.MONTHLY_TOKEN_LIMIT = 0
 
+    def test_tool_policy_preserves_system_and_tool_results_without_mutation(self):
+        messages = [
+            {"role": "system", "content": "Existing RAG instructions"},
+            {"role": "assistant", "tool_calls": [{"id": "call1"}]},
+            {"role": "tool", "tool_call_id": "call1", "content": "No useful results"},
+        ]
+        original = json.dumps(messages)
+        tools = [{"type": "function", "function": {"name": "search_web"}}]
+        result = dccai_pipe._with_tool_execution_policy(messages, tools)
+        self.assertEqual(result[1:], messages)
+        self.assertIn("search_web", result[0]["content"])
+        self.assertEqual(json.dumps(messages), original)
+
+    def test_tool_policy_does_not_claim_tools_when_absent_or_disabled(self):
+        messages = [{"role": "user", "content": "Search please"}]
+        tools = [{"type": "function", "function": {"name": "search_web"}}]
+        self.assertEqual(dccai_pipe._with_tool_execution_policy(messages, []), messages)
+        self.assertEqual(dccai_pipe._with_tool_execution_policy(messages, tools, "none"), messages)
+
     def test_local_model_is_exposed_with_text_only_metadata(self):
         models = {model["id"]: model for model in self.pipe.pipes()}
         local = models["dccai-local-80b"]

@@ -50,3 +50,15 @@ RUN find /app/build -type f \( -name "*.js" -o -name "*.html" \) -exec sed -i 's
 COPY branding/login_notice.html /tmp/login_notice.html
 RUN IDX=$(find /app/build -maxdepth 1 -name "index.html" -print -quit) && \
     if [ -n "$IDX" ]; then cat /tmp/login_notice.html >> "$IDX"; fi; rm -f /tmp/login_notice.html
+
+# Shared Japanese errors with correlation IDs at tool/completion boundaries.
+COPY dccai_errors.py /app/backend/dccai_errors.py
+COPY scripts/patch_public_errors.py /tmp/patch_public_errors.py
+RUN python3 /tmp/patch_public_errors.py /app/backend/open_webui
+
+
+# Immediate command actions and server-enforced per-chat modes.
+COPY dcc_modes.py dcc_command_api.py /app/backend/
+COPY commands/native-commands.js /app/build/dcc-native-commands.js
+COPY scripts/patch_command_modes.py /tmp/patch_command_modes.py
+RUN python3 /tmp/patch_command_modes.py /app

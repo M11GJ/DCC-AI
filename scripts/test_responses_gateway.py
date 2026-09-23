@@ -2,6 +2,7 @@ import copy
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -22,6 +23,100 @@ FUNCTION = {
 
 
 class ResponsesGatewayTests(unittest.TestCase):
+    def test_decisions_model_resolution_uses_an_explicit_allowlist(self):
+        for model in (
+            "jev-latest",
+            "dccai-jev-latest",
+            "typesafe/jev-latest",
+            "~typesafe/jev-latest",
+        ):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    gateway.resolve_decisions_model(model),
+                    gateway.OPENROUTER_JEV_MODEL,
+                )
+
+        for model in ("typesafe/jev-1.13", "openai/gpt-6-astra", ""):
+            with self.subTest(model=model), self.assertRaises(ValueError):
+                gateway.resolve_decisions_model(model)
+
+    def test_decisions_payload_forces_model_and_authenticated_user(self):
+        payload = {
+            "model": "jev-latest",
+            "state": "Please call tomorrow.",
+            "questions": {
+                "callback": {
+                    "type": "noul",
+                    "instructions": "Was a callback requested?",
+                }
+            },
+            "user": "forged-user",
+        }
+        upstream = gateway.prepare_decisions_payload(payload, "dcc-user")
+        self.assertEqual(upstream["model"], gateway.OPENROUTER_JEV_MODEL)
+        self.assertEqual(upstream["user"], "dcc-user:api")
+        self.assertEqual(payload["user"], "forged-user")
+
+    def test_decisions_payload_requires_state_and_questions(self):
+        invalid = (
+            {"model": "jev-latest", "questions": {"x": {"type": "noul"}}},
+            {"model": "jev-latest", "state": "x", "questions": {}},
+            {"model": "jev-latest", "state": "x", "questions": []},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                gateway.prepare_decisions_payload(payload, "dcc-user")
+
+    def test_decisions_token_total_uses_provider_reported_usage(self):
+        response = {
+            "usage": {
+                "input_tokens": 312,
+                "output_tokens": 48,
+                "cost": 0.000013,
+            }
+        }
+        self.assertEqual(gateway.decisions_token_total(response), 360)
+        self.assertEqual(gateway.decisions_token_total({}), 0)
+
+    def test_jev_usage_log_contains_metadata_but_not_request_or_answers(self):
+        response = {
+            "id": "decision_test",
+            "model": "typesafe/jev-1.13-20260917",
+            "provider": "TypeSafe",
+            "answers": {"private": {"type": "noul", "noul": 0.9}},
+            "usage": {"input_tokens": 10, "output_tokens": 2, "cost": 0.0001},
+        }
+        original = gateway.JEV_USAGE_FILE
+        with tempfile.TemporaryDirectory() as tempdir:
+            gateway.JEV_USAGE_FILE = str(pathlib.Path(tempdir) / "jev.jsonl")
+            try:
+                self.assertTrue(gateway.append_jev_usage("user-1", response))
+                event = json.loads(pathlib.Path(gateway.JEV_USAGE_FILE).read_text())
+            finally:
+                gateway.JEV_USAGE_FILE = original
+        self.assertEqual(event["end_user"], "user-1:api")
+        self.assertEqual(event["total_tokens"], 12)
+        self.assertNotIn("answers", event)
+        self.assertNotIn("state", event)
+        self.assertNotIn("questions", event)
+
+    def test_jev_monthly_counter_is_separate_from_regular_api_counter(self):
+        regular_original = gateway.TOKEN_USAGE_FILE
+        jev_original = gateway.JEV_TOKEN_USAGE_FILE
+        with tempfile.TemporaryDirectory() as tempdir:
+            gateway.TOKEN_USAGE_FILE = str(pathlib.Path(tempdir) / "regular.json")
+            gateway.JEV_TOKEN_USAGE_FILE = str(pathlib.Path(tempdir) / "jev.json")
+            try:
+                gateway.add_tokens("user-1", 11)
+                gateway.add_jev_tokens("user-1", 22)
+                self.assertEqual(gateway.month_tokens_used("user-1"), 11)
+                self.assertEqual(gateway.jev_month_tokens_used("user-1"), 22)
+            finally:
+                gateway.TOKEN_USAGE_FILE = regular_original
+                gateway.JEV_TOKEN_USAGE_FILE = jev_original
+        self.assertEqual(gateway.MONTHLY_TOKEN_LIMIT, 15_000_000)
+        self.assertEqual(gateway.JEV_MONTHLY_TOKEN_LIMIT, 50_000_000)
+
     def test_model_resolution_uses_an_explicit_allowlist(self):
         self.assertEqual(gateway.resolve_model("dccai.dccai-high-vision"), ("dccai-high", False))
         self.assertEqual(gateway.resolve_model("dccai-low"), ("dccai-low", False))
