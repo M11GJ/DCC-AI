@@ -6,7 +6,7 @@ import sys
 
 
 AUTH_REDIRECT_BEFORE = "        redirect_url = f'{redirect_base_url}/auth'\n"
-AUTH_REDIRECT_AFTER = "        redirect_url = f'{redirect_base_url}/auth?v=0.11.3'\n"
+AUTH_REDIRECT_AFTER = "        redirect_url = f'{redirect_base_url}/auth?v=0.11.4'\n"
 ERROR_REDIRECT_BEFORE = (
     "            redirect_url = f'{redirect_url}?error={urllib.parse.quote_plus(error_message)}'\n"
 )
@@ -24,7 +24,7 @@ def patch_source(source: str) -> str:
         if after in source:
             continue
         if source.count(before) != 1:
-            raise RuntimeError("Open WebUI OAuth redirect did not match the expected v0.11.3 source")
+            raise RuntimeError("Open WebUI OAuth redirect did not match the expected v0.11.4 source")
         source = source.replace(before, after, 1)
     return source
 

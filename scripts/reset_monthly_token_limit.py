@@ -6,12 +6,16 @@ import fcntl
 import json
 import os
 import tempfile
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 JST = timezone(timedelta(hours=9), "JST")
 COUNTER = Path(os.environ.get("TOKEN_USAGE_FILE", "/app/backend/data/dcc_ai_token_usage.json"))
+JEV_COUNTER = Path(
+    os.environ.get("JEV_TOKEN_USAGE_FILE", "/app/backend/data/dcc_ai_jev_token_usage.json")
+)
 RESET_LOG = Path(
     os.environ.get("TOKEN_RESET_LOG_FILE", "/app/backend/data/dcc_ai_token_usage_resets.jsonl")
 )
@@ -36,6 +40,13 @@ def atomic_json_write(path: Path, value) -> None:
             os.unlink(tmp_name)
 
 
+def read_counter(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--reason", default="モデル更新に伴う制限枠リセット")
@@ -45,49 +56,58 @@ def main():
     month = now.strftime("%Y-%m")
     reset_at = now.isoformat()
     COUNTER.parent.mkdir(parents=True, exist_ok=True)
+    JEV_COUNTER.parent.mkdir(parents=True, exist_ok=True)
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(SNAPSHOT_DIR, 0o700)
 
-    with open(str(COUNTER) + ".lock", "a+") as lockf:
-        fcntl.flock(lockf, fcntl.LOCK_EX)
-        try:
-            try:
-                data = json.loads(COUNTER.read_text(encoding="utf-8"))
-            except (FileNotFoundError, json.JSONDecodeError):
-                data = {}
-            previous_usage = {
-                user_id: int(total) for user_id, total in data.get(month, {}).items()
-            }
-            snapshot = {
-                "event": "monthly_token_limit_reset",
-                "month": month,
-                "reset_at": reset_at,
-                "reason": args.reason,
-                "previous_usage": previous_usage,
-                "previous_total": sum(previous_usage.values()),
-                "previous_users": len(previous_usage),
-            }
-            snapshot_path = SNAPSHOT_DIR / f"{now.strftime('%Y%m%d_%H%M%S')}.json"
-            atomic_json_write(snapshot_path, snapshot)
+    lock_paths = sorted({str(COUNTER) + ".lock", str(JEV_COUNTER) + ".lock"})
+    with ExitStack() as stack:
+        locks = [stack.enter_context(open(path, "a+")) for path in lock_paths]
+        for lockf in locks:
+            fcntl.flock(lockf, fcntl.LOCK_EX)
 
-            RESET_LOG.parent.mkdir(parents=True, exist_ok=True)
-            with open(RESET_LOG, "a", encoding="utf-8") as f:
-                f.write(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.chmod(RESET_LOG, 0o600)
+        data = read_counter(COUNTER)
+        jev_data = read_counter(JEV_COUNTER)
+        previous_usage = {
+            user_id: int(total) for user_id, total in data.get(month, {}).items()
+        }
+        previous_jev_usage = {
+            user_id: int(total) for user_id, total in jev_data.get(month, {}).items()
+        }
+        snapshot = {
+            "event": "monthly_token_limit_reset",
+            "month": month,
+            "reset_at": reset_at,
+            "reason": args.reason,
+            "previous_usage": previous_usage,
+            "previous_total": sum(previous_usage.values()),
+            "previous_users": len(previous_usage),
+            "previous_jev_usage": previous_jev_usage,
+            "previous_jev_total": sum(previous_jev_usage.values()),
+            "previous_jev_users": len(previous_jev_usage),
+        }
+        snapshot_path = SNAPSHOT_DIR / f"{now.strftime('%Y%m%d_%H%M%S')}.json"
+        atomic_json_write(snapshot_path, snapshot)
 
-            data[month] = {}
-            atomic_json_write(COUNTER, data)
-        finally:
-            fcntl.flock(lockf, fcntl.LOCK_UN)
+        RESET_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(RESET_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(RESET_LOG, 0o600)
+
+        data[month] = {}
+        jev_data[month] = {}
+        atomic_json_write(COUNTER, data)
+        atomic_json_write(JEV_COUNTER, jev_data)
 
     print(
         f"reset month={month} users={len(previous_usage)} "
-        f"previous_total={sum(previous_usage.values())} snapshot={snapshot_path}"
+        f"previous_total={sum(previous_usage.values())} "
+        f"jev_users={len(previous_jev_usage)} "
+        f"previous_jev_total={sum(previous_jev_usage.values())} snapshot={snapshot_path}"
     )
 
 
 if __name__ == "__main__":
     main()
-

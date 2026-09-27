@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:v0.11.3
+FROM ghcr.io/open-webui/open-webui:v0.11.4
 COPY scripts/patch_open_webui_stream_close.py /tmp/patch_open_webui_stream_close.py
 RUN python3 /tmp/patch_open_webui_stream_close.py /app/backend/open_webui/functions.py && \
     rm -f /tmp/patch_open_webui_stream_close.py
@@ -6,8 +6,8 @@ COPY scripts/patch_open_webui_auth_cache.py /tmp/patch_open_webui_auth_cache.py
 RUN python3 /tmp/patch_open_webui_auth_cache.py /app/backend/open_webui/utils/oauth.py && \
     rm -f /tmp/patch_open_webui_auth_cache.py
 
-# v0.11.0のHTMLをWebViewやブラウザが保持していても、v0.11.3の同等entryを
-# 旧ハッシュ名で配信して更新直後の白画面を防ぐ。内容は常に現在のentryを使う。
+# v0.11.0とv0.11.3のキャッシュ済みHTML向けに旧entry名も配信する。
+# 内容は現在のv0.11.4のentryを使う。
 RUN set -eu; \
     entry_dir=/app/build/_app/immutable/entry; \
     asset_dir=/app/build/_app/immutable/assets; \
@@ -16,8 +16,11 @@ RUN set -eu; \
     css_src="$(find "$asset_dir" -maxdepth 1 -type f -name '0.*.css' ! -name '0.D-1LH_Ar.css' -print -quit)"; \
     test -n "$start_src" && test -n "$app_src" && test -n "$css_src"; \
     cp "$start_src" "$entry_dir/start.BcfU-xkP.js"; \
+    cp "$start_src" "$entry_dir/start.DVTkig5c.js"; \
     cp "$app_src" "$entry_dir/app.WPjxzi0v.js"; \
-    cp "$css_src" "$asset_dir/0.D-1LH_Ar.css"
+    cp "$app_src" "$entry_dir/app.DyaYDsfM.js"; \
+    cp "$css_src" "$asset_dir/0.D-1LH_Ar.css"; \
+    cp "$css_src" "$asset_dir/0.DgJjT2oH.css"
 COPY branding/out/favicon.png                  /app/backend/open_webui/static/favicon.png
 COPY branding/out/favicon.svg                  /app/backend/open_webui/static/favicon.svg
 COPY branding/out/favicon.ico                  /app/backend/open_webui/static/favicon.ico
@@ -50,3 +53,15 @@ RUN find /app/build -type f \( -name "*.js" -o -name "*.html" \) -exec sed -i 's
 COPY branding/login_notice.html /tmp/login_notice.html
 RUN IDX=$(find /app/build -maxdepth 1 -name "index.html" -print -quit) && \
     if [ -n "$IDX" ]; then cat /tmp/login_notice.html >> "$IDX"; fi; rm -f /tmp/login_notice.html
+
+# Shared Japanese errors with correlation IDs at tool/completion boundaries.
+COPY dccai_errors.py /app/backend/dccai_errors.py
+COPY scripts/patch_public_errors.py /tmp/patch_public_errors.py
+RUN python3 /tmp/patch_public_errors.py /app/backend/open_webui
+
+
+# Immediate command actions and server-enforced per-chat modes.
+COPY dcc_modes.py dcc_command_api.py /app/backend/
+COPY commands/native-commands.js /app/build/dcc-native-commands.js
+COPY scripts/patch_command_modes.py /tmp/patch_command_modes.py
+RUN python3 /tmp/patch_command_modes.py /app

@@ -9,6 +9,8 @@ services:
       - "127.0.0.1:3000:8080"      # Cloudflare Tunnelからのみ到達可能
     volumes:
       - open-webui:/app/backend/data
+      - ./dccai_errors.py:/app/backend/dccai_errors.py:ro
+      - ./dcc-portal/loader.js:/app/build/static/loader.js:ro
     env_file:
       - ./open-webui.env
     environment:
@@ -101,8 +103,12 @@ services:
       - LITELLM_BASE_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - DATABASE_URL=${DATABASE_URL}
+      - TOKEN_USAGE_FILE=/webui-data/dcc_ai_token_usage.json
+      - JEV_TOKEN_USAGE_FILE=/webui-data/dcc_ai_jev_token_usage.json
+      - JEV_USAGE_FILE=/webui-data/dcc_ai_jev_usage.jsonl
       # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を維持すること
-      - MONTHLY_TOKEN_LIMIT=10000000
+      - MONTHLY_TOKEN_LIMIT=15000000
+      - JEV_MONTHLY_TOKEN_LIMIT=50000000
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
       - USAGE_SESSION_SECRET=${USAGE_SESSION_SECRET}
@@ -133,6 +139,7 @@ services:
       - litellm
     volumes:
       - ./scripts/responses_gateway.py:/app/responses_gateway.py:ro
+      - ./dccai_errors.py:/app/dccai_errors.py:ro
       - open-webui:/webui-data
     command: sh -c "pip install --quiet --no-cache-dir httpx && python3 /app/responses_gateway.py"
     environment:
@@ -140,10 +147,14 @@ services:
       - PORT=3003
       - LITELLM_BASE_URL=http://litellm:4000
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - WEBUI_DB_PATH=/webui-data/webui.db
       - TOKEN_USAGE_FILE=/webui-data/dcc_ai_token_usage.json
+      - JEV_TOKEN_USAGE_FILE=/webui-data/dcc_ai_jev_token_usage.json
+      - JEV_USAGE_FILE=/webui-data/dcc_ai_jev_usage.jsonl
       # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を維持すること
-      - MONTHLY_TOKEN_LIMIT=10000000
+      - MONTHLY_TOKEN_LIMIT=15000000
+      - JEV_MONTHLY_TOKEN_LIMIT=50000000
       - CODE_MAX_CONCURRENCY=3
     ports:
       - "127.0.0.1:3003:3003"

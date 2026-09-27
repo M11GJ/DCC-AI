@@ -45,12 +45,19 @@ LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 WEBUI_DB_PATH = os.environ.get("WEBUI_DB_PATH", "/webui-data/webui.db")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 TOKEN_USAGE_FILE = os.environ.get("TOKEN_USAGE_FILE", "/webui-data/dcc_ai_token_usage.json")
+JEV_TOKEN_USAGE_FILE = os.environ.get(
+    "JEV_TOKEN_USAGE_FILE", "/webui-data/dcc_ai_jev_token_usage.json"
+)
 TOKEN_RESET_LOG_FILE = os.environ.get(
     "TOKEN_RESET_LOG_FILE", "/webui-data/dcc_ai_token_usage_resets.jsonl"
 )
+JEV_USAGE_FILE = os.environ.get(
+    "JEV_USAGE_FILE", "/webui-data/dcc_ai_jev_usage.jsonl"
+)
 # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を手動で同期させること
 # (Open WebUIの管理画面でValvesを変更した場合はこちらの環境変数も合わせて変更が必要)。
-MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "10000000"))
+MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "15000000"))
+JEV_MONTHLY_TOKEN_LIMIT = int(os.environ.get("JEV_MONTHLY_TOKEN_LIMIT", "50000000"))
 SESSION_TTL = 6 * 3600
 OAUTH_FLOW_TTL = 10 * 60
 
@@ -246,7 +253,12 @@ def litellm_total_and_by_model(litellm_user_id: str):
             (litellm_user_id,),
         )
     except Exception:
-        return 0, {}
+        rows = []
+    rows = list(rows) + [
+        entry
+        for entry in _read_jev_usage_logs()
+        if entry.get("end_user") == litellm_user_id
+    ]
     total = 0
     by_model = {}
     for row in rows:
@@ -302,8 +314,17 @@ def _jst_month_utc_range():
 def api_tokens_this_month(user_id: str) -> int:
     """現在の制限枠で消費したAPIトークン数。
     Postgresの総記録ではなく、Pipe/Responsesが上限判定に使うカウンターを読む。"""
+    return _counter_tokens_this_month(TOKEN_USAGE_FILE, user_id)
+
+
+def jev_tokens_this_month(user_id: str) -> int:
+    """Jev専用の現在の月間制限枠で消費したトークン数。"""
+    return _counter_tokens_this_month(JEV_TOKEN_USAGE_FILE, user_id)
+
+
+def _counter_tokens_this_month(path: str, user_id: str) -> int:
     try:
-        with open(TOKEN_USAGE_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         month = datetime.now(JST).strftime("%Y-%m")
         return int(data.get(month, {}).get(user_id, 0))
@@ -313,8 +334,17 @@ def api_tokens_this_month(user_id: str) -> int:
 
 def api_tokens_this_month_all_users():
     """管理者用: 現在の制限枠で消費したAPIトークン数。"""
+    return _counter_tokens_this_month_all_users(TOKEN_USAGE_FILE)
+
+
+def jev_tokens_this_month_all_users():
+    """管理者用: Jev専用の現在の月間制限枠。"""
+    return _counter_tokens_this_month_all_users(JEV_TOKEN_USAGE_FILE)
+
+
+def _counter_tokens_this_month_all_users(path: str):
     try:
-        with open(TOKEN_USAGE_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         month = datetime.now(JST).strftime("%Y-%m")
         return {user_id: int(total) for user_id, total in data.get(month, {}).items()}
@@ -353,7 +383,7 @@ def total_tokens_this_month_all_users():
             (start, end),
         )
     except Exception:
-        return {}
+        rows = []
     per_user = {}
     for row in rows:
         eu = row.get("end_user") or ""
@@ -361,6 +391,15 @@ def total_tokens_this_month_all_users():
             continue
         base = eu[: -len(":api")] if eu.endswith(":api") else eu
         per_user[base] = per_user.get(base, 0) + int(row.get("total") or 0)
+    for entry in _read_jev_usage_logs():
+        t = entry.get("startTime")
+        if not t or not (start <= t < end):
+            continue
+        eu = entry.get("end_user") or ""
+        if not eu:
+            continue
+        base = eu[: -len(":api")] if eu.endswith(":api") else eu
+        per_user[base] = per_user.get(base, 0) + int(entry.get("total_tokens") or 0)
     return per_user
 
 
@@ -372,13 +411,50 @@ _SPEND_LOGS_CACHE = {"logs": None, "ts": 0.0}
 _SPEND_LOGS_TTL_SEC = 60
 
 
+def _read_jev_usage_logs():
+    """Jev JSONLをLiteLLM SpendLogsと同じ集計用の形へ正規化する。"""
+    logs = []
+    try:
+        with open(JEV_USAGE_FILE, encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                    timestamp = str(event.get("timestamp") or "")
+                    if timestamp.endswith("Z"):
+                        timestamp = timestamp[:-1] + "+00:00"
+                    started = datetime.fromisoformat(timestamp)
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    logs.append(
+                        {
+                            "end_user": event.get("end_user"),
+                            "model_group": event.get("model_group") or "jev-latest",
+                            "model": event.get("model") or "jev-latest",
+                            "total_tokens": int(event.get("total_tokens") or 0),
+                            "startTime": started,
+                        }
+                    )
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return logs
+
+
 def _fetch_all_spend_logs():
     now = time.time()
     if _SPEND_LOGS_CACHE["logs"] is not None and (now - _SPEND_LOGS_CACHE["ts"]) < _SPEND_LOGS_TTL_SEC:
         return _SPEND_LOGS_CACHE["logs"]
-    logs = _pg_query(
-        'SELECT end_user, model_group, model, total_tokens, "startTime" FROM "LiteLLM_SpendLogs"'
+    logs = list(
+        _pg_query(
+            'SELECT end_user, model_group, model, total_tokens, "startTime" FROM "LiteLLM_SpendLogs"'
+        )
     )
+    logs.extend(_read_jev_usage_logs())
     _SPEND_LOGS_CACHE["logs"] = logs
     _SPEND_LOGS_CACHE["ts"] = now
     return logs
@@ -403,9 +479,9 @@ def litellm_all_users_grouped():
     return per_user
 
 
-# litellmのmodel_groupを表示用の4系統(High/Low/Code/Local 80B)にまとめる。
+# model_groupを表示用の5系統(High/Low/Code/Local 80B/Jev)にまとめる。
 # フォールバック先(*-legacy, backup-low)は上位ティアに合算して表示する。
-MODEL_TIERS = ["High", "Low", "Code", "Local 80B"]
+MODEL_TIERS = ["High", "Low", "Code", "Local 80B", "Jev"]
 MODEL_TIER_MAP = {
     "dccai-high": "High",
     "dccai-high-legacy": "High",
@@ -414,6 +490,8 @@ MODEL_TIER_MAP = {
     "dccai-backup-low": "Low",
     "dccai-code": "Code",
     "dccai-local-80b": "Local 80B",
+    "jev-latest": "Jev",
+    "~typesafe/jev-latest": "Jev",
 }
 
 
@@ -492,6 +570,7 @@ THEME_CSS_BLOCK = """
     --series-low:     #eb6834;
     --series-code:    #1baf7a;
     --series-local:   #8b5cf6;
+    --series-jev:     #d94f8a;
   }}
   @media (prefers-color-scheme: dark) {{
     :root:where(:not([data-theme="light"])) {{
@@ -507,6 +586,7 @@ THEME_CSS_BLOCK = """
       --series-low:     #d95926;
       --series-code:    #199e70;
       --series-local:   #7c4dd8;
+      --series-jev:     #e55f9b;
     }}
   }}
   :root[data-theme="dark"] {{
@@ -522,6 +602,7 @@ THEME_CSS_BLOCK = """
     --series-low:     #d95926;
     --series-code:    #199e70;
     --series-local:   #7c4dd8;
+    --series-jev:     #e55f9b;
   }}
   body {{ background: var(--page); color: var(--text-primary); margin: 0;
           font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif; }}
@@ -642,11 +723,17 @@ PAGE_TEMPLATE = """<!doctype html>
     <div class="row"><span>API利用</span><span>{api:,}</span></div>
   </div>
   <div class="card">
-    <div class="muted">今月のAPI利用状況(月間上限: {monthly_limit:,} トークン)</div>
+    <div class="muted">今月の通常API利用状況(Jev除く、月間上限: {monthly_limit:,} トークン)</div>
     <div class="limit-track"><div class="limit-fill" style="width:{limit_pct}%; background:{limit_color};"></div></div>
     <div class="row" style="border-bottom:none;"><span>{api_month:,} トークン使用</span><span>残り {limit_remaining_pct}%</span></div>
     <p class="muted" style="margin:6px 0 0;">この上限は<strong>API経由の利用のみ</strong>が対象です。WebUI(チャット画面)の利用は含まれません。</p>
     {reset_note}
+  </div>
+  <div class="card">
+    <div class="muted">今月のJev API利用状況(月間上限: {jev_monthly_limit:,} トークン)</div>
+    <div class="limit-track"><div class="limit-fill" style="width:{jev_limit_pct}%; background:{jev_limit_color};"></div></div>
+    <div class="row" style="border-bottom:none;"><span>{jev_api_month:,} トークン使用</span><span>残り {jev_limit_remaining_pct}%</span></div>
+    <p class="muted" style="margin:6px 0 0;">Jevは通常APIの1,500万トークン枠とは別枠です。</p>
   </div>
   <div class="card">
     <div class="muted" style="margin-bottom:8px">モデル別内訳(WebUI+API合算)</div>
@@ -684,6 +771,19 @@ PAGE_TEMPLATE = """<!doctype html>
       APIキーはChat Completions用と共通です。<strong>月間トークン上限もChat Completions APIと合算</strong>されます。
     </p>
   </div>
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px">⚖️ API接続情報(Jev Decisions API)</div>
+    <div>Endpoint: <code>https://responses.shu-dcc.net/v1/decisions</code></div>
+    <div style="margin-top:4px;">モデルID: <code>jev-latest</code></div>
+    <pre>curl https://responses.shu-dcc.net/v1/decisions \\
+  -H "Authorization: Bearer sk-xxxxxxxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"model":"jev-latest","state":"返金を希望します","questions":{{"refund":{{"type":"noul","instructions":"返金依頼ですか？"}}}}}}'</pre>
+    <p class="muted" style="margin-top:8px;">
+      Jevは文章を生成するチャットモデルではなく、Choice / Score / Noulを返す構造化判断モデルです。
+      通常APIとは別枠で、<strong>月間5,000万トークンまで</strong>利用できます。
+    </p>
+  </div>
   {admin_link}
 </div>
 """ + THEME_TOGGLE_SCRIPT_BLOCK
@@ -715,7 +815,7 @@ ADMIN_TEMPLATE = """<!doctype html>
   .rank-total {{ width: 72px; flex: none; text-align: right; font-size: 0.82rem;
                 color: var(--text-secondary); font-variant-numeric: tabular-nums; }}
 
-  .legend {{ display: flex; gap: 16px; margin-bottom: 18px; font-size: 0.82rem; color: var(--text-secondary); }}
+  .legend {{ display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 18px; font-size: 0.82rem; color: var(--text-secondary); }}
   .legend-item {{ display: flex; align-items: center; gap: 6px; }}
   .legend-swatch {{ width: 10px; height: 10px; border-radius: 2px; }}
   .bar-row {{ display: flex; align-items: center; gap: 10px; margin: 10px 0; }}
@@ -728,6 +828,7 @@ ADMIN_TEMPLATE = """<!doctype html>
   .seg-low {{ background: var(--series-low); }}
   .seg-code {{ background: var(--series-code); }}
   .seg-local {{ background: var(--series-local); }}
+  .seg-jev {{ background: var(--series-jev); }}
   .bar-total {{ width: 72px; flex: none; text-align: right; font-size: 0.82rem;
                 color: var(--text-secondary); font-variant-numeric: tabular-nums; }}
 
@@ -753,7 +854,7 @@ ADMIN_TEMPLATE = """<!doctype html>
       <button class="pill-btn" id="theme-toggle" type="button">🌓 表示切替</button>
     </div>
   </div>
-  <p class="muted">2026-07-23以降の記録が対象です(それ以前はlitellmのトークン集計が未接続でした)。</p>
+  <p class="muted">High / Low / Code / Local 80Bは2026-07-23以降、Jevは2026-09-18の追加以降の記録が対象です。</p>
 
   <div class="card">
     <div class="date-nav">
@@ -765,9 +866,14 @@ ADMIN_TEMPLATE = """<!doctype html>
   </div>
 
   <div class="card">
-    <div class="muted" style="margin-bottom:8px;">今月のAPI利用状況(月間上限: {monthly_limit:,} トークン/人。WebUIチャットは対象外)</div>
+    <div class="muted" style="margin-bottom:8px;">今月の通常API利用状況(Jev除く、月間上限: {monthly_limit:,} トークン/人。WebUIチャットは対象外)</div>
     {reset_note}
     {monthly_api_rows}
+  </div>
+
+  <div class="card">
+    <div class="muted" style="margin-bottom:8px;">今月のJev API利用状況(月間上限: {jev_monthly_limit:,} トークン/人。通常APIとは別枠)</div>
+    {monthly_jev_rows}
   </div>
 
   <div class="card">
@@ -777,6 +883,7 @@ ADMIN_TEMPLATE = """<!doctype html>
       <div class="legend-item"><span class="legend-swatch" style="background:var(--series-low)"></span>Low</div>
       <div class="legend-item"><span class="legend-swatch" style="background:var(--series-code)"></span>Code</div>
       <div class="legend-item"><span class="legend-swatch" style="background:var(--series-local)"></span>Local 80B</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--series-jev)"></span>Jev</div>
     </div>
     {model_bar_rows}
   </div>
@@ -784,7 +891,7 @@ ADMIN_TEMPLATE = """<!doctype html>
   <div class="card">
     <div class="muted" style="margin-bottom:8px;">モデル別(全期間累計)</div>
     <table>
-      <tr><th>ユーザー</th><th>High</th><th>Low</th><th>Code</th><th>Local 80B</th><th>合計</th></tr>
+      <tr><th>ユーザー</th><th>High</th><th>Low</th><th>Code</th><th>Local 80B</th><th>Jev</th><th>合計</th></tr>
       {model_table_rows}
     </table>
   </div>
@@ -1091,8 +1198,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 key=lambda r: -r[1],
             )
 
-            def _limit_row(label, used):
-                pct, _remaining_pct, color = _limit_bar_style(used, MONTHLY_TOKEN_LIMIT)
+            def _limit_row(label, used, limit):
+                pct, _remaining_pct, color = _limit_bar_style(used, limit)
                 return (
                     f'<div class="limit-row"><div class="limit-name" title="{label}">{label}</div>'
                     f'<div class="limit-track"><div class="limit-fill" style="width:{pct}%; background:{color};"></div></div>'
@@ -1100,8 +1207,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 )
 
             monthly_api_rows = "".join(
-                _limit_row(label, used) for label, used in monthly_api_data
+                _limit_row(label, used, MONTHLY_TOKEN_LIMIT)
+                for label, used in monthly_api_data
             ) or '<p class="muted">今月のAPI利用はまだありません</p>'
+
+            monthly_jev = jev_tokens_this_month_all_users()
+            monthly_jev_data = sorted(
+                ((label_for(uid), used) for uid, used in monthly_jev.items() if used > 0),
+                key=lambda r: -r[1],
+            )
+            monthly_jev_rows = "".join(
+                _limit_row(label, used, JEV_MONTHLY_TOKEN_LIMIT)
+                for label, used in monthly_jev_data
+            ) or '<p class="muted">今月のJev API利用はまだありません</p>'
 
             # ---- モデル別(全期間累計テーブル) ----
             by_model_per_user = litellm_all_users_by_model()
@@ -1115,9 +1233,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             model_table_rows = "".join(
                 f"<tr><td>{label}</td><td>{tiers.get('High', 0):,}</td>"
                 f"<td>{tiers.get('Low', 0):,}</td><td>{tiers.get('Code', 0):,}</td>"
-                f"<td>{tiers.get('Local 80B', 0):,}</td><td>{total:,}</td></tr>"
+                f"<td>{tiers.get('Local 80B', 0):,}</td><td>{tiers.get('Jev', 0):,}</td>"
+                f"<td>{total:,}</td></tr>"
                 for label, tiers, total in model_rows_data
-            ) or "<tr><td colspan=6>データなし</td></tr>"
+            ) or "<tr><td colspan=7>データなし</td></tr>"
 
             max_model_total = max((r[2] for r in model_rows_data), default=1)
 
@@ -1131,6 +1250,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ("low", "Low", tiers.get("Low", 0)),
                         ("code", "Code", tiers.get("Code", 0)),
                         ("local", "Local 80B", tiers.get("Local 80B", 0)),
+                        ("jev", "Jev", tiers.get("Jev", 0)),
                     )
                     if val > 0
                 )
@@ -1163,6 +1283,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rank_rows=rank_rows,
                 monthly_limit=MONTHLY_TOKEN_LIMIT,
                 monthly_api_rows=monthly_api_rows,
+                jev_monthly_limit=JEV_MONTHLY_TOKEN_LIMIT,
+                monthly_jev_rows=monthly_jev_rows,
                 reset_note=token_limit_reset_note(),
                 model_bar_rows=model_bar_rows,
                 model_table_rows=model_table_rows,
@@ -1193,6 +1315,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         )
         api_month = api_tokens_this_month(user_id)
         limit_pct, limit_remaining_pct, limit_color = _limit_bar_style(api_month, MONTHLY_TOKEN_LIMIT)
+        jev_api_month = jev_tokens_this_month(user_id)
+        jev_limit_pct, jev_limit_remaining_pct, jev_limit_color = _limit_bar_style(
+            jev_api_month, JEV_MONTHLY_TOKEN_LIMIT
+        )
         body = PAGE_TEMPLATE.format(
             name=name or "you",
             total=webui_total + api_total,
@@ -1205,6 +1331,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             limit_pct=limit_pct,
             limit_remaining_pct=limit_remaining_pct,
             limit_color=limit_color,
+            jev_monthly_limit=JEV_MONTHLY_TOKEN_LIMIT,
+            jev_api_month=jev_api_month,
+            jev_limit_pct=jev_limit_pct,
+            jev_limit_remaining_pct=jev_limit_remaining_pct,
+            jev_limit_color=jev_limit_color,
             reset_note=token_limit_reset_note(),
         )
         self._send(200, body)

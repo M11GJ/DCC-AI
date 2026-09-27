@@ -2,8 +2,10 @@
 
 import hashlib
 import http.cookies
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -89,6 +91,40 @@ class UsagePageAuthTests(unittest.TestCase):
         parsed = http.cookies.SimpleCookie()
         parsed.load(cookie)
         self.assertIn(usage_page.COOKIE_NAME, parsed)
+
+    def test_jev_usage_is_included_in_user_and_admin_model_totals(self):
+        event = {
+            "timestamp": "2026-09-18T06:27:34+00:00",
+            "event_id": "jev-test",
+            "end_user": "user-1:api",
+            "model_group": "jev-latest",
+            "model": "typesafe/jev-1.13-20260917",
+            "total_tokens": 439,
+        }
+        original_file = usage_page.JEV_USAGE_FILE
+        original_cache = dict(usage_page._SPEND_LOGS_CACHE)
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = pathlib.Path(tempdir) / "jev.jsonl"
+            path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            usage_page.JEV_USAGE_FILE = str(path)
+            usage_page._SPEND_LOGS_CACHE = {"logs": None, "ts": 0.0}
+            try:
+                with mock.patch.object(usage_page, "_pg_query", return_value=[]):
+                    total, by_model = usage_page.litellm_total_and_by_model("user-1:api")
+                    admin = usage_page.litellm_all_users_by_model()
+            finally:
+                usage_page.JEV_USAGE_FILE = original_file
+                usage_page._SPEND_LOGS_CACHE = original_cache
+        self.assertEqual(total, 439)
+        self.assertEqual(by_model, {"jev-latest": 439})
+        self.assertEqual(admin["user-1"]["Jev"], 439)
+
+    def test_regular_and_jev_monthly_allowances_are_displayed_separately(self):
+        self.assertEqual(usage_page.MONTHLY_TOKEN_LIMIT, 15_000_000)
+        self.assertEqual(usage_page.JEV_MONTHLY_TOKEN_LIMIT, 50_000_000)
+        self.assertIn("今月の通常API利用状況", usage_page.PAGE_TEMPLATE)
+        self.assertIn("今月のJev API利用状況", usage_page.PAGE_TEMPLATE)
+        self.assertIn("monthly_jev_rows", usage_page.ADMIN_TEMPLATE)
 
 
 if __name__ == "__main__":

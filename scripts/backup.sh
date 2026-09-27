@@ -66,7 +66,10 @@ log "webui.db バックアップ完了: $(du -sh "${BACKUP_DIR}/webui.db" | cut 
 for usage_file in \
   dcc_ai_high_usage.json \
   dcc_ai_token_usage.json \
-  dcc_ai_token_usage_resets.jsonl; do
+  dcc_ai_jev_token_usage.json \
+  dcc_ai_token_usage_resets.jsonl \
+  dcc_ai_jev_usage.jsonl \
+  dcc_ai_jev_limit_migrations.jsonl; do
   if docker exec open-webui test -f "/app/backend/data/${usage_file}"; then
     docker cp "open-webui:/app/backend/data/${usage_file}" "${BACKUP_DIR}/${usage_file}"
   fi
@@ -74,6 +77,10 @@ done
 if docker exec open-webui test -d "/app/backend/data/dcc_ai_token_usage_reset_snapshots"; then
   docker cp "open-webui:/app/backend/data/dcc_ai_token_usage_reset_snapshots" \
     "${BACKUP_DIR}/dcc_ai_token_usage_reset_snapshots"
+fi
+if docker exec open-webui test -d "/app/backend/data/dcc_ai_jev_limit_migration_snapshots"; then
+  docker cp "open-webui:/app/backend/data/dcc_ai_jev_limit_migration_snapshots" \
+    "${BACKUP_DIR}/dcc_ai_jev_limit_migration_snapshots"
 fi
 chmod -R go-rwx "${BACKUP_DIR}"
 

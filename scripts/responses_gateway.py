@@ -2,6 +2,9 @@
 """
 DCC AI - Responses API Gateway
 外部からの Responses API 呼び出し(POST /v1/responses)を litellm へ中継する。
+また、Jev Latest の構造化判断 API (POST /v1/decisions)を OpenRouter の
+Decisions APIへ中継する。Jevは会話文を生成せず、Choice/Score/Noulの判断結果を返す
+ため、Chat CompletionsやResponses APIのモデル一覧には混在させない。
 Open WebUI の Pipe(dccai_pipe.py)は Chat Completions 専用で Responses API 形式を
 扱えないため(Open WebUI 本体の /responses ルートも「Connection」モデル専用で
 Pipeモデルには使えない)、同等のポリシー(認証・モデルルーティング・Code専用の
@@ -11,6 +14,7 @@ Pipeモデルには使えない)、同等のポリシー(認証・モデルル�
 共有し、Chat Completions API・Responses API の両方をまとめて「API経由」の同じ枠
 として消費する(WebUIチャットは引き続き対象外)。
 """
+from dccai_errors import public_error
 import fcntl
 import html
 import json
@@ -33,10 +37,24 @@ WEBUI_DB_PATH = os.environ.get("WEBUI_DB_PATH", "/webui-data/webui.db")
 # dccai_pipe.py の Valve TOKEN_USAGE_FILE と同じボリューム上の同じファイルを指すこと
 # (WebUI側は /app/backend/data/... というパスで見えるが、実体は同じ名前付きボリューム)。
 TOKEN_USAGE_FILE = os.environ.get("TOKEN_USAGE_FILE", "/webui-data/dcc_ai_token_usage.json")
+JEV_TOKEN_USAGE_FILE = os.environ.get(
+    "JEV_TOKEN_USAGE_FILE", "/webui-data/dcc_ai_jev_token_usage.json"
+)
+JEV_USAGE_FILE = os.environ.get(
+    "JEV_USAGE_FILE", "/webui-data/dcc_ai_jev_usage.jsonl"
+)
 # dccai_pipe.py の Valve MONTHLY_TOKEN_LIMIT と同じ値を維持すること。
-MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "10000000"))
+MONTHLY_TOKEN_LIMIT = int(os.environ.get("MONTHLY_TOKEN_LIMIT", "15000000"))
+JEV_MONTHLY_TOKEN_LIMIT = int(os.environ.get("JEV_MONTHLY_TOKEN_LIMIT", "50000000"))
 CODE_MAX_CONCURRENCY = int(os.environ.get("CODE_MAX_CONCURRENCY", "1"))
 REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "1200"))
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_DECISIONS_URL = os.environ.get(
+    "OPENROUTER_DECISIONS_URL", "https://openrouter.ai/api/alpha/decisions"
+)
+OPENROUTER_JEV_MODEL = os.environ.get(
+    "OPENROUTER_JEV_MODEL", "~typesafe/jev-latest"
+)
 
 _code_sem = threading.Semaphore(CODE_MAX_CONCURRENCY)
 JST = timezone(timedelta(hours=9), "JST")
@@ -88,8 +106,16 @@ def _locked_rmw(path, mutate) -> None:
 
 
 def month_tokens_used(user_id: str) -> int:
+    return _month_tokens_used(TOKEN_USAGE_FILE, user_id)
+
+
+def jev_month_tokens_used(user_id: str) -> int:
+    return _month_tokens_used(JEV_TOKEN_USAGE_FILE, user_id)
+
+
+def _month_tokens_used(path: str, user_id: str) -> int:
     try:
-        with open(TOKEN_USAGE_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         data = {}
@@ -98,6 +124,14 @@ def month_tokens_used(user_id: str) -> int:
 
 
 def add_tokens(user_id: str, n: int) -> None:
+    _add_month_tokens(TOKEN_USAGE_FILE, user_id, n)
+
+
+def add_jev_tokens(user_id: str, n: int) -> None:
+    _add_month_tokens(JEV_TOKEN_USAGE_FILE, user_id, n)
+
+
+def _add_month_tokens(path: str, user_id: str, n: int) -> None:
     if n <= 0:
         return
     month = current_jst_month()
@@ -107,7 +141,7 @@ def add_tokens(user_id: str, n: int) -> None:
         data[month][user_id] = data[month].get(user_id, 0) + n
         return data
 
-    _locked_rmw(TOKEN_USAGE_FILE, mutate)
+    _locked_rmw(path, mutate)
 
 
 def resolve_model(raw_model: str):
@@ -128,6 +162,84 @@ def resolve_model(raw_model: str):
     if resolved is None:
         raise ValueError("model is not available through the Responses API")
     return resolved
+
+
+def resolve_decisions_model(raw_model: str) -> str:
+    """Jev Latest以外へOpenRouterキーを転用されないよう完全一致で制限する。"""
+    aliases = {
+        "jev-latest",
+        "dccai-jev-latest",
+        "typesafe/jev-latest",
+        "~typesafe/jev-latest",
+    }
+    if (raw_model or "").strip().lower() not in aliases:
+        raise ValueError("model is not available through the Decisions API")
+    return OPENROUTER_JEV_MODEL
+
+
+def prepare_decisions_payload(payload: dict, user_id: str) -> dict:
+    """公開入力をOpenRouter Decisions API向けに正規化する。"""
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    if "state" not in payload:
+        raise ValueError("state is required")
+    questions = payload.get("questions")
+    if not isinstance(questions, dict) or not questions:
+        raise ValueError("questions must be a non-empty object")
+
+    upstream = dict(payload)
+    upstream["model"] = resolve_decisions_model(payload.get("model", ""))
+    # 呼出元が任意のuser値を偽装できないよう、DCC AI認証済みuser_idで上書きする。
+    upstream["user"] = f"{user_id}:api"
+    return upstream
+
+
+def decisions_token_total(response: dict) -> int:
+    """OpenRouterの実測usageからDCC共通月間枠へ加算するトークン数を返す。"""
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return 0
+    try:
+        input_tokens = max(0, int(usage.get("input_tokens", 0) or 0))
+        output_tokens = max(0, int(usage.get("output_tokens", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+    return input_tokens + output_tokens
+
+
+def append_jev_usage(user_id: str, response: dict) -> bool:
+    """Jevの使用量だけを追記する。state/questions/answers本文は保存しない。"""
+    total_tokens = decisions_token_total(response)
+    if total_tokens <= 0:
+        return False
+    usage = response.get("usage") or {}
+    event = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_id": response.get("id") or f"jev_{uuid.uuid4().hex}",
+        "end_user": f"{user_id}:api",
+        "model_group": "jev-latest",
+        "model": response.get("model") or OPENROUTER_JEV_MODEL,
+        "provider": response.get("provider"),
+        "input_tokens": int(usage.get("input_tokens", 0) or 0),
+        "output_tokens": int(usage.get("output_tokens", 0) or 0),
+        "total_tokens": total_tokens,
+        "cost": usage.get("cost"),
+    }
+    try:
+        os.makedirs(os.path.dirname(JEV_USAGE_FILE), exist_ok=True)
+        with open(JEV_USAGE_FILE + ".lock", "a+") as lockf:
+            fcntl.flock(lockf, fcntl.LOCK_EX)
+            try:
+                with open(JEV_USAGE_FILE, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            finally:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+        return True
+    except Exception as exc:
+        print(f"responses_gateway: failed to append Jev usage: {type(exc).__name__}", flush=True)
+        return False
 
 
 def normalize_request_tools(payload: dict) -> None:
@@ -465,7 +577,9 @@ class Handler(http_server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/v1/responses", "/responses"):
+        response_paths = ("/v1/responses", "/responses")
+        decisions_paths = ("/v1/decisions", "/decisions")
+        if path not in (*response_paths, *decisions_paths):
             self._send_json(404, {"error": {"message": "not found"}})
             return
 
@@ -473,7 +587,7 @@ class Handler(http_server.BaseHTTPRequestHandler):
         api_key = auth[7:] if auth.startswith("Bearer ") else ""
         user_id = resolve_user(api_key)
         if not user_id:
-            self._send_json(401, {"error": {"message": "invalid API key", "type": "authentication_error"}})
+            self._send_json(401, {"error": public_error("invalid API key", 401, "responses_auth")})
             return
 
         length = int(self.headers.get("Content-Length", "0"))
@@ -481,18 +595,36 @@ class Handler(http_server.BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw)
         except Exception:
-            self._send_json(400, {"error": {"message": "invalid JSON body"}})
+            self._send_json(400, {"error": public_error("invalid JSON body", 400, "responses_request")})
             return
 
-        normalize_request_tools(payload)
-
-        try:
-            litellm_model, is_code = resolve_model(payload.get("model", ""))
-        except ValueError as exc:
-            self._send_json(
-                400,
-                {"error": {"message": str(exc), "type": "invalid_request_error"}},
-            )
+        if path in decisions_paths:
+            if (
+                JEV_MONTHLY_TOKEN_LIMIT > 0
+                and jev_month_tokens_used(user_id) >= JEV_MONTHLY_TOKEN_LIMIT
+            ):
+                self._send_json(
+                    429,
+                    {
+                        "error": {
+                            "message": (
+                                f"今月の Jev API利用上限({JEV_MONTHLY_TOKEN_LIMIT:,} トークン)に達しました。"
+                                "来月また使えます。"
+                            ),
+                            "type": "rate_limit_exceeded",
+                        }
+                    },
+                )
+                return
+            try:
+                upstream_payload = prepare_decisions_payload(payload, user_id)
+            except ValueError as exc:
+                self._send_json(
+                    400,
+                    {"error": public_error(exc, 400, "decisions_request")},
+                )
+                return
+            self._proxy_decisions(upstream_payload, user_id)
             return
 
         if MONTHLY_TOKEN_LIMIT > 0 and month_tokens_used(user_id) >= MONTHLY_TOKEN_LIMIT:
@@ -510,6 +642,17 @@ class Handler(http_server.BaseHTTPRequestHandler):
             )
             return
 
+        normalize_request_tools(payload)
+
+        try:
+            litellm_model, is_code = resolve_model(payload.get("model", ""))
+        except ValueError as exc:
+            self._send_json(
+                400,
+                {"error": public_error(exc, 400, "responses_request")},
+            )
+            return
+
         payload["model"] = litellm_model
         payload["user"] = f"{user_id}:api"  # litellm側の集計もdccai_pipe.pyと同じ形式に揃える
         stream = bool(payload.get("stream"))
@@ -522,6 +665,55 @@ class Handler(http_server.BaseHTTPRequestHandler):
         finally:
             if sem:
                 sem.release()
+
+    def _proxy_decisions(self, payload, user_id):
+        if not OPENROUTER_API_KEY:
+            self._send_json(
+                503,
+                {
+                    "error": public_error(
+                        "OpenRouter API is not configured", 503, "decisions_config"
+                    )
+                },
+            )
+            return
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://ai.shu-dcc.net",
+            "X-OpenRouter-Title": "DCC AI",
+        }
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+                r = client.post(OPENROUTER_DECISIONS_URL, json=payload, headers=headers)
+            if r.status_code >= 400:
+                self._send_json(
+                    r.status_code,
+                    {
+                        "error": public_error(
+                            r.text, r.status_code, "decisions_upstream"
+                        )
+                    },
+                )
+                return
+            try:
+                response = r.json()
+            except Exception as exc:
+                self._send_json(
+                    502,
+                    {"error": public_error(exc, 502, "decisions_decode")},
+                )
+                return
+            total_tokens = decisions_token_total(response)
+            if total_tokens:
+                add_jev_tokens(user_id, total_tokens)
+                append_jev_usage(user_id, response)
+            self._send_json(r.status_code, response)
+        except Exception as exc:
+            self._send_json(
+                502,
+                {"error": public_error(exc, 502, "decisions")},
+            )
 
     def _proxy(self, payload, stream, user_id):
         url = f"{LITELLM_BASE_URL}/v1/responses"
@@ -538,14 +730,7 @@ class Handler(http_server.BaseHTTPRequestHandler):
                 with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
                     r = client.post(url, json=upstream_payload, headers=headers)
                     if r.status_code >= 400:
-                        body = r.content
-                        self.send_response(r.status_code)
-                        self.send_header(
-                            "Content-Type", r.headers.get("content-type", "application/json")
-                        )
-                        self.send_header("Content-Length", str(len(body)))
-                        self.end_headers()
-                        self.wfile.write(body)
+                        self._send_json(r.status_code, {"error": public_error(r.text, r.status_code, "responses_stream")})
                         return
 
                     resp_json = r.json()
@@ -568,6 +753,9 @@ class Handler(http_server.BaseHTTPRequestHandler):
             else:
                 with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
                     r = client.post(url, json=payload, headers=headers)
+                    if r.status_code >= 400:
+                        self._send_json(r.status_code, {"error": public_error(r.text, r.status_code, "responses")})
+                        return
                     body = r.content
                     try:
                         resp_json = r.json()
@@ -580,15 +768,16 @@ class Handler(http_server.BaseHTTPRequestHandler):
                         usage = resp_json.get("usage") or {}
                         if usage.get("total_tokens"):
                             add_tokens(user_id, usage["total_tokens"])
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._send_json(502, {"error": public_error(exc, 502, "responses_decode")})
+                        return
                     self.send_response(r.status_code)
                     self.send_header("Content-Type", r.headers.get("content-type", "application/json"))
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
         except Exception as e:
-            self._send_json(502, {"error": {"message": f"upstream error: {e}"}})
+            self._send_json(502, {"error": public_error(e, 502, "responses")})
 
     def log_message(self, format, *args):
         pass

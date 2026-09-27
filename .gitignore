@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 searxng/secret_key
 discord-oidc-worker/
+
+# n200でのデプロイ前バックアップ
+backup-*/
