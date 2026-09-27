@@ -9,6 +9,9 @@ services:
       - "127.0.0.1:3000:8080"      # Cloudflare Tunnelからのみ到達可能
     volumes:
       - open-webui:/app/backend/data
+      # DCCポータルに埋め込まれたとき、横スワイプをポータルへ知らせる（M11GJ/dcc-ecosystem ops/open-webui/loader.js と同じ）。
+      # 起動時に build/static から static へコピーされるため、コピー元へ重ねる。
+      - ./dcc-portal/loader.js:/app/build/static/loader.js:ro
     env_file:
       - ./open-webui.env
     environment:
